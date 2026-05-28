@@ -512,7 +512,16 @@ pub const Monitor = struct {
     }
 
     pub fn drainAndUpdate(self: *Monitor) !bool {
-        // Idle fast path: avoid the ArrayList allocation when every ring is empty.
+        const now_ns: u64 = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
+
+        const lines_before = self.lines_count;
+        const head_before = self.lines_head;
+        const was_at_bottom = self.atBottom();
+
+        const sink: line_buf.Sink = .{ .ptr = self, .push = appendLineCb };
+
+        // Fast path: no new events. Still check each assembler in case some
+        // unterminated content has been sitting in buf past the idle threshold.
         var any_data = false;
         for (&self.rings) |*ring| {
             if (ring.hasItem()) {
@@ -520,7 +529,11 @@ pub const Monitor = struct {
                 break;
             }
         }
-        if (!any_data) return false;
+        if (!any_data) {
+            for (&self.assemblers) |*asm_buf|
+                try asm_buf.idleFlush(now_ns, line_buf.idle_flush_threshold_ns, sink);
+            return self.maybeFollow(was_at_bottom, lines_before, head_before);
+        }
 
         var temp: std.ArrayList(types.Event) = .empty;
         defer temp.deinit(self.allocator);
@@ -529,7 +542,11 @@ pub const Monitor = struct {
             while (ring.pop()) |ev| try temp.append(self.allocator, ev);
         }
 
-        if (temp.items.len == 0) return false;
+        if (temp.items.len == 0) {
+            for (&self.assemblers) |*asm_buf|
+                try asm_buf.idleFlush(now_ns, line_buf.idle_flush_threshold_ns, sink);
+            return self.maybeFollow(was_at_bottom, lines_before, head_before);
+        }
 
         const C = struct {
             fn lessThan(_: void, a: types.Event, b: types.Event) bool {
@@ -538,15 +555,14 @@ pub const Monitor = struct {
         };
         std.mem.sort(types.Event, temp.items, {}, C.lessThan);
 
-        const was_at_bottom = self.atBottom();
-
-        const sink: line_buf.Sink = .{ .ptr = self, .push = appendLineCb };
         for (temp.items) |ev| {
             const dev = ev.device_id;
             if (dev >= types.max_slots) continue;
             try self.assemblers[dev].feed(ev.data[0..ev.len], ev.timestamp_ns, sink);
         }
         for (&self.assemblers) |*asm_buf| try asm_buf.flushPending(sink);
+        for (&self.assemblers) |*asm_buf|
+            try asm_buf.idleFlush(now_ns, line_buf.idle_flush_threshold_ns, sink);
 
         if (self.follow and was_at_bottom and self.lines_count > 0) {
             self.list_view.cursor = @intCast(self.lines_count - 1);
@@ -554,6 +570,15 @@ pub const Monitor = struct {
         }
 
         return true;
+    }
+
+    fn maybeFollow(self: *Monitor, was_at_bottom: bool, lines_before: usize, head_before: usize) bool {
+        const changed = self.lines_count != lines_before or self.lines_head != head_before;
+        if (changed and self.follow and was_at_bottom and self.lines_count > 0) {
+            self.list_view.cursor = @intCast(self.lines_count - 1);
+            self.list_view.ensureScroll();
+        }
+        return changed;
     }
 
     fn appendLineCb(ptr: *anyopaque, line: types.Line) anyerror!void {
@@ -777,6 +802,7 @@ pub const Monitor = struct {
         const ts_text = try fmt.formatTimestamp(arena, line.timestamp_ns);
         const dev_text = try std.fmt.allocPrint(arena, " [D{d}] ", .{line.port_id});
         const term_text: []const u8 = switch (line.terminator) {
+            .none => "",
             .lf => "\\n",
             .cr => "\\r",
             .crlf => "\\r\\n",

@@ -18,6 +18,7 @@ comptime {
 }
 
 pub const Terminator = enum {
+    none,
     lf,
     cr,
     crlf,
@@ -26,6 +27,7 @@ pub const Terminator = enum {
 
 pub fn terminatorBytes(t: Terminator) []const u8 {
     return switch (t) {
+        .none => "",
         .lf => "\n",
         .cr => "\r",
         .crlf => "\r\n",

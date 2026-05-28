@@ -71,6 +71,7 @@ fn appendRow(arena: std.mem.Allocator, out: *std.ArrayList(u8), line: types.Line
 
 fn terminatorNotation(t: types.Terminator) []const u8 {
     return switch (t) {
+        .none => "",
         .lf => "\\n",
         .cr => "\\r",
         .crlf => "\\r\\n",
