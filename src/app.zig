@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const theme = @import("theme.zig");
 const monitor_mod = @import("monitor.zig");
+const types = @import("types.zig");
 
 const Monitor = monitor_mod.Monitor;
 
@@ -16,6 +18,11 @@ pub const App = struct {
     top_bar: TopBar = .{},
     bottom_bar: BottomBar = .{},
     hrule: HRule = .{},
+
+    // Last terminal title we emitted, so we only re-send the OSC sequence
+    // when the text actually changes (not on every 33ms tick).
+    title_buf: [128]u8 = undefined,
+    title_len: usize = 0,
 
     pub fn init(self: *App, allocator: std.mem.Allocator, io: std.Io) void {
         self.allocator = allocator;
@@ -44,10 +51,52 @@ pub const App = struct {
         };
     }
 
+    // Build the terminal tab title and emit it only if it changed since last
+    // time. Colored dot (red = idle, green = a port is open) since tab titles
+    // are plain text and ignore ANSI color — emoji is the only way to color it.
+    // On Windows port names are short (COM3), so we show "<dot> zsm · COM3 +2"
+    // (first name plus a "+N" overflow). On macOS/Linux the device paths are
+    // long (/dev/tty.usbserial-...), so we show a count: "<dot> zsm · 2 Ports".
+    fn updateTitle(self: *App, ctx: *vxfw.EventContext) !void {
+        const connected = self.monitor.anyConnected();
+        const dot = if (connected) "\u{1F7E2}" else "\u{1F534}"; // 🟢 / 🔴
+
+        var buf: [128]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        w.writeAll(dot) catch {};
+        w.writeAll(" zsm") catch {};
+
+        var count: usize = 0;
+        var first_name: []const u8 = "";
+        for (self.monitor.ports) |maybe_port| {
+            const p = maybe_port orelse continue;
+            if (count == 0) first_name = types.displayName(p.name);
+            count += 1;
+        }
+        if (count > 0) {
+            w.writeAll(" \u{00B7} ") catch {}; // " · "
+            if (builtin.os.tag == .windows) {
+                w.writeAll(first_name) catch {};
+                if (count > 1) w.print(" +{d}", .{count - 1}) catch {};
+            } else {
+                // names too long to show on macOS/Linux; show a count instead
+                w.print("{d} {s}", .{ count, if (count == 1) "Port" else "Ports" }) catch {};
+            }
+        }
+
+        const title = w.buffered();
+        if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
+
+        @memcpy(self.title_buf[0..title.len], title);
+        self.title_len = title.len;
+        try ctx.setTitle(title);
+    }
+
     fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         const self: *App = @ptrCast(@alignCast(ptr));
         switch (event) {
             .init, .focus_in => {
+                try self.updateTitle(ctx);
                 try ctx.requestFocus(self.widget());
                 try ctx.tick(33, self.widget());
                 return;
@@ -56,6 +105,7 @@ pub const App = struct {
                 const data_changed = try self.monitor.drainAndUpdate();
                 const health_changed = self.monitor.healthTick();
                 if (data_changed or health_changed) ctx.redraw = true;
+                try self.updateTitle(ctx);
                 try ctx.tick(33, self.widget());
                 return;
             },
