@@ -10,6 +10,7 @@ comptime {
     _ = @import("line_buf.zig");
     _ = @import("ring.zig");
     _ = @import("export.zig");
+    _ = @import("save_prompt.zig");
 }
 
 pub fn main(init: std.process.Init) !void {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const zig_serial = @import("serial");
@@ -12,6 +13,7 @@ const fmt = @import("fmt.zig");
 const inspector = @import("inspector.zig");
 const line_render = @import("line_render.zig");
 const exp = @import("export.zig");
+const save_prompt_mod = @import("save_prompt.zig");
 
 pub const max_history: usize = 10000;
 
@@ -64,6 +66,8 @@ pub const Monitor = struct {
     list_view: vxfw.ListView = .{ .children = .{ .slice = &.{} } },
     overlay: overlay_mod.Overlay,
     overlay_open: bool = false,
+    save_prompt: save_prompt_mod.SavePrompt,
+    save_prompt_open: bool = false,
     follow: bool = true,
     display_mode: DisplayMode = .string,
 
@@ -95,6 +99,8 @@ pub const Monitor = struct {
         self.lines_count = 0;
         self.overlay = overlay_mod.Overlay.init(allocator, io);
         self.overlay_open = false;
+        self.save_prompt = save_prompt_mod.SavePrompt.init(allocator, io);
+        self.save_prompt_open = false;
         self.follow = true;
         self.display_mode = .string;
 
@@ -123,6 +129,7 @@ pub const Monitor = struct {
         }
         self.lines_count = 0;
         self.overlay.deinit();
+        self.save_prompt.deinit();
     }
 
     pub fn widget(self: *Monitor) vxfw.Widget {
@@ -166,22 +173,48 @@ pub const Monitor = struct {
         self.export_message_until_ns = now + 3 * std.time.ns_per_s;
     }
 
-    // Export the current view to a CSV file in cwd. All formatting is in
-    // export.zig; this method just snapshots lines into an arena, builds the
-    // CSV in memory, and writes the whole buffer in one go. On any failure
-    // a transient error message is shown in the TopBar.
-    pub fn runExport(self: *Monitor) void {
+    // Start an export: generate the fixed filename and open the save-path
+    // prompt. The actual write happens in finishExport when the user confirms.
+    fn openSavePrompt(self: *Monitor) void {
         if (self.lines_count == 0) {
             self.setExportMessage("export: nothing to export", true);
             return;
         }
+        const now_ns: u64 = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
+        var scratch: [64]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&scratch);
+        const filename = exp.makeFilename(fba.allocator(), now_ns) catch {
+            self.setExportMessage("export: out of memory", true);
+            return;
+        };
+        self.save_prompt.open(filename) catch {
+            self.setExportMessage("export: out of memory", true);
+            return;
+        };
+        self.save_prompt_open = true;
+    }
 
+    // Export the current view to a CSV file in the directory chosen in the
+    // save prompt. All formatting is in export.zig; this method just snapshots
+    // lines into an arena, builds the CSV in memory, and writes the whole
+    // buffer in one go. On any failure a transient error message is shown in
+    // the TopBar.
+    fn finishExport(self: *Monitor) void {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const now_ns: u64 = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
-        const filename = exp.makeFilename(arena, now_ns) catch {
+        const dir_text = self.save_prompt.currentText(arena) catch {
+            self.setExportMessage("export: out of memory", true);
+            return;
+        };
+        const dir_trimmed = std.mem.trim(u8, dir_text, " ");
+        const path = save_prompt_mod.joinExportPath(
+            arena,
+            dir_trimmed,
+            self.save_prompt.filename(),
+            builtin.os.tag == .windows,
+        ) catch {
             self.setExportMessage("export: out of memory", true);
             return;
         };
@@ -197,8 +230,12 @@ pub const Monitor = struct {
             return;
         };
 
-        const cwd = std.Io.Dir.cwd();
-        const file = cwd.createFile(self.io, filename, .{ .read = false, .truncate = true }) catch |err| {
+        const create_opts: std.Io.Dir.CreateFileOptions = .{ .read = false, .truncate = true };
+        const file_or_err = if (std.fs.path.isAbsolute(path))
+            std.Io.Dir.createFileAbsolute(self.io, path, create_opts)
+        else
+            std.Io.Dir.cwd().createFile(self.io, path, create_opts);
+        const file = file_or_err catch |err| {
             var buf: [128]u8 = undefined;
             const m = std.fmt.bufPrint(&buf, "export failed: {s}", .{@errorName(err)}) catch "export failed";
             self.setExportMessage(m, true);
@@ -213,8 +250,8 @@ pub const Monitor = struct {
             return;
         };
 
-        var buf: [128]u8 = undefined;
-        const m = std.fmt.bufPrint(&buf, "exported {d} lines → {s}", .{ self.lines_count, filename }) catch "export complete";
+        var buf: [192]u8 = undefined;
+        const m = std.fmt.bufPrint(&buf, "exported {d} lines → {s}", .{ self.lines_count, path }) catch "export complete";
         self.setExportMessage(m, false);
     }
 
@@ -307,6 +344,13 @@ pub const Monitor = struct {
     }
 
     pub fn keyHints(self: *const Monitor, arena: std.mem.Allocator) ![]const KeyHint {
+        if (self.save_prompt_open) {
+            const hints = try arena.alloc(KeyHint, 3);
+            hints[0] = .{ .key = "Tab", .label = "complete" };
+            hints[1] = .{ .key = "Enter", .label = "save" };
+            hints[2] = .{ .key = "Esc", .label = "cancel" };
+            return hints;
+        }
         if (self.overlay_open) {
             const hints = try arena.alloc(KeyHint, 5);
             hints[0] = .{ .key = "↑↓", .label = "ports" };
@@ -333,6 +377,26 @@ pub const Monitor = struct {
     }
 
     pub fn handleKey(self: *Monitor, key: vaxis.Key, ctx: *vxfw.EventContext) !bool {
+        if (self.save_prompt_open) {
+            switch (self.save_prompt.handleKey(key, ctx)) {
+                .cancel => {
+                    self.save_prompt_open = false;
+                    ctx.redraw = true;
+                    return true;
+                },
+                .save => {
+                    self.save_prompt_open = false;
+                    self.finishExport();
+                    ctx.redraw = true;
+                    return true;
+                },
+                .consumed => {
+                    ctx.redraw = true;
+                    return true;
+                },
+                .ignored => return false,
+            }
+        }
         if (self.overlay_open) {
             const result = self.overlay.handleKey(key);
             switch (result) {
@@ -372,7 +436,7 @@ pub const Monitor = struct {
             return true;
         }
         if (key.matches('e', .{})) {
-            self.runExport();
+            self.openSavePrompt();
             ctx.redraw = true;
             return true;
         }
@@ -648,7 +712,7 @@ pub const Monitor = struct {
         else
             null;
 
-        const want_inspector = !self.overlay_open and cursor_line != null;
+        const want_inspector = !self.overlay_open and !self.save_prompt_open and cursor_line != null;
         var inspector_h: u16 = 0;
         if (want_inspector) {
             const content_h = try inspector.computeHeight(arena, cursor_line.?, max.width);
@@ -699,6 +763,11 @@ pub const Monitor = struct {
         if (self.overlay_open) {
             const overlay_surf = try self.overlay.widget().draw(ctx);
             try all_children.append(arena, .{ .surface = overlay_surf, .origin = .{ .row = 0, .col = 0 }, .z_index = 1 });
+        }
+
+        if (self.save_prompt_open) {
+            const prompt_surf = try self.save_prompt.widget().draw(ctx);
+            try all_children.append(arena, .{ .surface = prompt_surf, .origin = .{ .row = 0, .col = 0 }, .z_index = 2 });
         }
 
         return .{
