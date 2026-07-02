@@ -5,12 +5,14 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis.git#a367b89da09bfe5e1b628501940de5b4f858f5f3",
-            .hash = "vaxis-0.6.0-BWNV_HHwCQB451KS7A8SMykALblPmGwHnzSfiJHjN3_9",
+            .url = "git+https://github.com/rockorager/libvaxis.git#ca781b3c01f44a92e5331652823b5a9ce445be96",
+            .hash = "vaxis-0.6.0-BWNV_Gz5CQBTx7g34RYMPTL-bJhsFCU3ECHQ-CZlBVsn",
         },
+        // Vendored from ZigEmbeddedGroup/serial @ 4c4caab with a local patch:
+        // DarwinPortIterator was never updated for Zig 0.16's std.Io.Dir API
+        // (upstream master has the same bug), so the macOS build fails without it.
         .serial = .{
-            .url = "git+https://github.com/ZigEmbeddedGroup/serial.git#4c4caabad4a78e699034a95ba7145bf07cdd8e78",
-            .hash = "serial-0.0.1-PoeRzPq5AAAHeo07adkaBjANT4JUaOpNWcnxQGqjxcQY",
+            .path = "deps/serial",
         },
     },
     .paths = .{
