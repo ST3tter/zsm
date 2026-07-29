@@ -624,7 +624,8 @@ pub const Monitor = struct {
             if (dev >= types.max_slots) continue;
             try self.assemblers[dev].feed(ev.data[0..ev.len], ev.timestamp_ns, sink);
         }
-        for (&self.assemblers) |*asm_buf| try asm_buf.flushPending(sink);
+        // Pending terminators are NOT flushed here: a trailing `\r` may pair
+        // with a `\n` arriving in the next drain. idleFlush ages them out.
         for (&self.assemblers) |*asm_buf|
             try asm_buf.idleFlush(now_ns, line_buf.idle_flush_threshold_ns, sink);
 
