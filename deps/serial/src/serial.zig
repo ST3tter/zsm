@@ -471,6 +471,15 @@ extern "cfgmgr32" fn CM_Get_Device_IDA(
     ulFlags: std.os.windows.ULONG,
 ) callconv(.winapi) std.os.windows.DWORD;
 
+/// The 8250 driver registers ttyS0..ttyS31 unconditionally; ports without
+/// probed hardware report `type` == 0 (PORT_UNKNOWN) in sysfs. USB-serial
+/// devices have no `type` file at all, so a missing file means "keep".
+fn isPhantomUart(io: std.Io, tty_dir: std.Io.Dir) bool {
+    var buf: [16]u8 = undefined;
+    const t = tty_dir.readFile(io, "type", &buf) catch return false;
+    return std.mem.eql(u8, std.mem.trim(u8, t, " \n\r\t"), "0");
+}
+
 const LinuxPortIterator = struct {
     const Self = @This();
 
@@ -507,6 +516,8 @@ const LinuxPortIterator = struct {
                 // not a dir => we don't care
                 var tty_dir = self.dir.openDir(self.io, entry.name, .{}) catch continue;
                 defer tty_dir.close(self.io);
+
+                if (isPhantomUart(self.io, tty_dir)) continue;
 
                 // we need the device dir
                 // no device dir =>  virtual device
@@ -580,6 +591,8 @@ const LinuxInformationIterator = struct {
             // not a dir => we don't care
             var tty_dir = self.dir.openDir(self.io, entry.name, .{}) catch continue;
             defer tty_dir.close(self.io);
+
+            if (isPhantomUart(self.io, tty_dir)) continue;
 
             // we need the device dir
             // no device dir =>  virtual device
