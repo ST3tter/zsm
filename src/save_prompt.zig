@@ -10,9 +10,9 @@ const vxfw = vaxis.vxfw;
 
 const theme = @import("theme.zig");
 
-const is_windows = builtin.os.tag == .windows;
+const is_windows = builtin.target.os.tag == .windows;
 // Windows and macOS filesystems are case-insensitive by default.
-const fold_case = is_windows or builtin.os.tag == .macos;
+const fold_case = is_windows or builtin.target.os.tag == .macos;
 const native_sep: []const u8 = if (is_windows) "\\" else "/";
 
 pub const KeyResult = enum { consumed, ignored, cancel, save };
@@ -257,7 +257,7 @@ pub const SavePrompt = struct {
         }
         try subs.append(arena, .{ .origin = .{ .row = 1, .col = col }, .surface = field_surf });
 
-        const file_text = try std.fmt.allocPrint(arena, "File: {s}", .{self.filename()});
+        const file_text = try arena.print("File: {s}", .{self.filename()});
         const file_line = vxfw.Text{ .text = file_text, .style = theme.subtitle, .softwrap = false, .overflow = .clip };
         try subs.append(arena, .{ .origin = .{ .row = 3, .col = col }, .surface = try file_line.draw(line_ctx) });
 

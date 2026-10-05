@@ -14,9 +14,9 @@ pub fn makeFilename(arena: std.mem.Allocator, ts_ns: u64) ![]const u8 {
     const year_day = day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const day_secs = ep_secs.getDaySeconds();
-    return std.fmt.allocPrint(arena, "zsm-export-{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}.csv", .{
+    return arena.print("zsm-export-{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}.csv", .{
         @as(u32, year_day.year),
-        @as(u32, @intFromEnum(month_day.month)),
+        @as(u32, @backingInt(month_day.month)),
         @as(u32, month_day.day_index) + 1,
         day_secs.getHoursIntoDay(),
         day_secs.getMinutesIntoHour(),
@@ -87,7 +87,7 @@ fn appendStringField(arena: std.mem.Allocator, out: *std.ArrayList(u8), text: []
             const esc = try fmt.escapeOne(arena, b);
             try out.appendSlice(arena, esc);
         } else if (b >= 0x80) {
-            const esc = try std.fmt.allocPrint(arena, "\\x{x:0>2}", .{b});
+            const esc = try arena.print("\\x{x:0>2}", .{b});
             try out.appendSlice(arena, esc);
         } else {
             try out.append(arena, b);

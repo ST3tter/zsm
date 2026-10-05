@@ -16,7 +16,7 @@ pub const Port = struct {
     config: zig_serial.SerialConfig,
     allocator: std.mem.Allocator,
 
-    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(types.PortState.closed)),
+    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(types.PortState.closed)),
     running: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
     dropped: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
@@ -56,7 +56,7 @@ pub const Port = struct {
             .ring = ring,
         };
 
-        self.state.store(@intFromEnum(types.PortState.open), .release);
+        self.state.store(@backingInt(types.PortState.open), .release);
         self.running.store(1, .release);
         self.thread = try std.Thread.spawn(.{}, readerThread, .{self});
         return self;
@@ -66,19 +66,19 @@ pub const Port = struct {
         self.running.store(0, .release);
         // Unblock the reader thread immediately on Windows; otherwise it sits in
         // ReadFile for up to ReadTotalTimeoutConstant (100ms) before noticing.
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             _ = CancelIoEx(self.file.handle, null);
         }
         if (self.thread) |t| t.join();
         self.thread = null;
         self.file.close(self.io);
-        self.state.store(@intFromEnum(types.PortState.closed), .release);
+        self.state.store(@backingInt(types.PortState.closed), .release);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
 
     pub fn getState(self: *const Port) types.PortState {
-        return @enumFromInt(self.state.load(.acquire));
+        return @fromBackingInt(@intCast(self.state.load(.acquire)));
     }
 
     pub fn droppedCount(self: *const Port) u64 {
@@ -89,7 +89,7 @@ pub const Port = struct {
         var buf: [types.event_payload_bytes]u8 = undefined;
         while (self.running.load(.acquire) == 1) {
             const n = rawRead(self.file.handle, &buf) catch {
-                self.state.store(@intFromEnum(types.PortState.errored), .release);
+                self.state.store(@backingInt(types.PortState.errored), .release);
                 return;
             };
             if (n == 0) continue;
@@ -110,7 +110,7 @@ pub const Port = struct {
 };
 
 fn setLowLatency(handle: std.posix.fd_t) !void {
-    switch (comptime builtin.os.tag) {
+    switch (comptime builtin.target.os.tag) {
         .windows => {
             var t: COMMTIMEOUTS = .{
                 .ReadIntervalTimeout = std.math.maxInt(std.os.windows.DWORD),
@@ -123,8 +123,8 @@ fn setLowLatency(handle: std.posix.fd_t) !void {
         },
         .linux, .macos => {
             var settings = try std.posix.tcgetattr(handle);
-            settings.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-            settings.cc[@intFromEnum(std.posix.V.TIME)] = 1;
+            settings.cc[@backingInt(std.posix.V.MIN)] = 0;
+            settings.cc[@backingInt(std.posix.V.TIME)] = 1;
             try std.posix.tcsetattr(handle, .NOW, settings);
         },
         else => @compileError("unsupported OS"),
@@ -132,7 +132,7 @@ fn setLowLatency(handle: std.posix.fd_t) !void {
 }
 
 fn rawRead(handle: std.posix.fd_t, buf: []u8) !usize {
-    switch (comptime builtin.os.tag) {
+    switch (comptime builtin.target.os.tag) {
         .windows => {
             var bytes_read: std.os.windows.DWORD = 0;
             const ok = ReadFile(handle, buf.ptr, @intCast(buf.len), &bytes_read, null);

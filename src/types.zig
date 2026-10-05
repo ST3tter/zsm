@@ -8,7 +8,7 @@ pub const Event = extern struct {
     device_id: u8,
     _reserved: u8 = 0,
     len: u16,
-    data: [event_payload_bytes]u8 = [_]u8{0} ** event_payload_bytes,
+    data: [event_payload_bytes]u8 = @splat(0),
 };
 
 comptime {

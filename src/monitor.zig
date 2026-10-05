@@ -213,7 +213,7 @@ pub const Monitor = struct {
             arena,
             dir_trimmed,
             self.save_prompt.filename(),
-            builtin.os.tag == .windows,
+            builtin.target.os.tag == .windows,
         ) catch {
             self.setExportMessage("export: out of memory", true);
             return;
@@ -790,9 +790,9 @@ pub const Monitor = struct {
             if (i > 0) {
                 try spans.append(arena, .{ .text = " │ ", .style = theme.subtitle });
             }
-            const slot_text = try std.fmt.allocPrint(arena, "D{d} ", .{i});
+            const slot_text = try arena.print("D{d} ", .{i});
             if (maybe_port) |port| {
-                const baud_text = try std.fmt.allocPrint(arena, " {d}", .{port.config.baud_rate});
+                const baud_text = try arena.print(" {d}", .{port.config.baud_rate});
                 const port_idx = @min(i, types.max_slots - 1);
                 // Dot reflects per-slot health: errored → red, fresh drops → orange,
                 // healthy → slot's native identity color.
@@ -870,7 +870,7 @@ pub const Monitor = struct {
         const line = self.lineAt(entry.slot_idx) orelse return vxfw.Surface.empty(line_widget);
 
         const ts_text = try fmt.formatTimestamp(arena, line.timestamp_ns);
-        const dev_text = try std.fmt.allocPrint(arena, " [D{d}] ", .{line.port_id});
+        const dev_text = try arena.print(" [D{d}] ", .{line.port_id});
         const term_text: []const u8 = switch (line.terminator) {
             .none => "",
             .lf => "\\n",
@@ -910,4 +910,3 @@ fn drawHRule(ctx: vxfw.DrawContext, width: u16) std.mem.Allocator.Error!vxfw.Sur
         .{ .width = width, .height = 1 },
     ));
 }
-

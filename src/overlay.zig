@@ -201,17 +201,17 @@ pub const Overlay = struct {
                 const style: vaxis.Style = if (i == self.cursor) theme.selected else theme.normal;
                 const open_slot = self.slotForFileName(p.file_name);
                 const status: []const u8 = if (open_slot) |s|
-                    try std.fmt.allocPrint(arena, " [D{d}]", .{s})
+                    try arena.print(" [D{d}]", .{s})
                 else
                     "";
-                const line_text = try std.fmt.allocPrint(arena, "{s}{s:<10} {s}{s}", .{ marker, types.displayName(p.file_name), p.display_name, status });
+                const line_text = try arena.print("{s}{s:<10} {s}{s}", .{ marker, types.displayName(p.file_name), p.display_name, status });
                 try pushLine(arena, &subs, line_text, style, row, col, line_ctx);
                 row += 1;
             }
         }
         row += 1;
 
-        const baud_text = try std.fmt.allocPrint(arena, "Baud: {d}", .{baud_rates[self.baud_idx]});
+        const baud_text = try arena.print("Baud: {d}", .{baud_rates[self.baud_idx]});
         try pushLine(arena, &subs, baud_text, theme.normal, row, col, line_ctx);
         row += 2;
 
@@ -219,9 +219,9 @@ pub const Overlay = struct {
         row += 1;
         for (self.connected_slots, 0..) |slot_name, i| {
             const conn_text = if (slot_name) |n|
-                try std.fmt.allocPrint(arena, "  D{d} = {s}", .{ i, types.displayName(n) })
+                try arena.print("  D{d} = {s}", .{ i, types.displayName(n) })
             else
-                try std.fmt.allocPrint(arena, "  D{d} = (free)", .{i});
+                try arena.print("  D{d} = (free)", .{i});
             try pushLine(arena, &subs, conn_text, theme.subtitle, row, col, line_ctx);
             row += 1;
         }

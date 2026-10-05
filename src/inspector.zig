@@ -65,7 +65,7 @@ pub fn draw(
 
     // Label row
     const ts_text = try fmt.formatTimestamp(arena, line.timestamp_ns);
-    const label_text = try std.fmt.allocPrint(arena, " D{d} @ {s}  ({d} bytes)", .{ line.port_id, ts_text, total });
+    const label_text = try arena.print(" D{d} @ {s}  ({d} bytes)", .{ line.port_id, ts_text, total });
     const label_spans = try arena.alloc(vxfw.RichText.TextSpan, 1);
     label_spans[0] = .{ .text = label_text, .style = theme.subtitle };
     const label_rt = try arena.create(vxfw.RichText);

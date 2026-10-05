@@ -15,20 +15,20 @@ pub fn escapeOne(arena: std.mem.Allocator, b: u8) ![]const u8 {
         0x0C => "\\f",
         0x0D => "\\r",
         0x1B => "\\e",
-        else => try std.fmt.allocPrint(arena, "\\x{x:0>2}", .{b}),
+        else => try arena.print("\\x{x:0>2}", .{b}),
     };
 }
 
 pub fn byteRepr(arena: std.mem.Allocator, b: u8) ![]const u8 {
     if (isControlByte(b)) return escapeOne(arena, b);
-    if (b >= 0x80) return try std.fmt.allocPrint(arena, "\\x{x:0>2}", .{b});
+    if (b >= 0x80) return try arena.print("\\x{x:0>2}", .{b});
     const buf = try arena.alloc(u8, 1);
     buf[0] = b;
     return buf;
 }
 
 pub fn hexRepr(arena: std.mem.Allocator, b: u8) ![]const u8 {
-    return try std.fmt.allocPrint(arena, "{x:0>2}", .{b});
+    return try arena.print("{x:0>2}", .{b});
 }
 
 pub fn padRight(arena: std.mem.Allocator, s: []const u8, width: u16) ![]const u8 {
@@ -45,7 +45,7 @@ pub fn formatTimestamp(arena: std.mem.Allocator, ts_ns: u64) ![]u8 {
     const ms = ms_total % 1000;
     const ep_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(sec_total) };
     const day_secs = ep_secs.getDaySeconds();
-    return std.fmt.allocPrint(arena, "[{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}]", .{
+    return arena.print("[{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}]", .{
         day_secs.getHoursIntoDay(),
         day_secs.getMinutesIntoHour(),
         day_secs.getSecondsIntoMinute(),
@@ -65,9 +65,9 @@ pub fn formatIso8601(arena: std.mem.Allocator, ts_ns: u64) ![]u8 {
     const year_day = day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const day_secs = ep_secs.getDaySeconds();
-    return std.fmt.allocPrint(arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
+    return arena.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
         @as(u32, year_day.year),
-        @as(u32, @intFromEnum(month_day.month)),
+        @as(u32, @backingInt(month_day.month)),
         @as(u32, month_day.day_index) + 1,
         day_secs.getHoursIntoDay(),
         day_secs.getMinutesIntoHour(),

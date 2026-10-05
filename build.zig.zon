@@ -2,15 +2,17 @@
     .name = .zsm,
     .version = "0.1.0",
     .fingerprint = 0x91360344afea7b50, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
+        // zig-0.17 branch (not yet merged into main).
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis.git#ca781b3c01f44a92e5331652823b5a9ce445be96",
-            .hash = "vaxis-0.6.0-BWNV_Gz5CQBTx7g34RYMPTL-bJhsFCU3ECHQ-CZlBVsn",
+            .url = "git+https://github.com/rockorager/libvaxis.git#6fd944a27fb3d6f596e981076381a3131f2448b4",
+            .hash = "vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mecnD6D7w",
         },
-        // Vendored from ZigEmbeddedGroup/serial @ 4c4caab with a local patch:
+        // Vendored from ZigEmbeddedGroup/serial @ 4c4caab with local patches:
         // DarwinPortIterator was never updated for Zig 0.16's std.Io.Dir API
         // (upstream master has the same bug), so the macOS build fails without it.
+        // For Zig 0.17, @cImport("termios.h") was replaced by a direct tcflush extern.
         .serial = .{
             .path = "deps/serial",
         },

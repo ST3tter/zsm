@@ -75,7 +75,7 @@ pub const App = struct {
         }
         if (count > 0) {
             w.writeAll(" \u{00B7} ") catch {}; // " · "
-            if (builtin.os.tag == .windows) {
+            if (builtin.target.os.tag == .windows) {
                 w.writeAll(first_name) catch {};
                 if (count > 1) w.print(" +{d}", .{count - 1}) catch {};
             } else {
