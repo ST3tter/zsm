@@ -27,7 +27,7 @@ zsm currently only receives. `Port` opens the device read/write (`src/port.zig:4
   - Esc: close the bar.
   - Editing keys work as in the export prompt (`vxfw.TextField`).
   - All other hotkeys (`o`, `c`, `e`, `f`, Tab view toggle, list ↑/↓) are suppressed. `Ctrl+C` still quits, `Ctrl+Shift+C` still copies, and mouse selection still works.
-- **Echo:** a TX line uses port 0, a send timestamp, the command text and the chosen ending. It renders as `12:00:01.100 [D0] → AT+GMR \r\n`, with `→` and the body in the accent style so it stands apart from device replies. The inspector works on it like on any other line.
+- **Echo:** a TX line uses port 0, a send timestamp, the command text and the chosen ending. It renders as `12:00:01.100 [TX] AT+GMR\r\n`: the `[TX]` tag replaces `[D0]` (same width, so columns line up), and the tag and body are in the accent style so it stands apart from device replies. (An earlier `[D0] →` marker read as if D0 had sent it.) The inspector works on it like on any other line.
 - **Bottom-bar hints** while the bar is open: `Enter send │ Tab ending │ ↑↓ history │ Esc close`. When it's closed, an `s send` hint is added.
 - **Export:** a new `dir` column (`rx`/`tx`) goes after `port`.
 
@@ -52,7 +52,7 @@ zsm currently only receives. `Port` opens the device read/write (`src/port.zig:4
    - `drawMain` reserves a row for the bar.
    - `sendToD0()` calls `ports[0].write`, then `appendLine` with a `.tx` line whose text is duped like RX lines.
    - On failure it shows the error in the top bar via `setExportMessage`.
-6. **Rendering** in `src/line_render.zig` / `drawLineFn`: TX lines get the `→` marker and the accent body style in all three display modes.
+6. **Rendering** in `src/line_render.zig` / `drawLineFn`: TX lines get the `[TX]` tag and the accent style in all three display modes.
 7. **Export** in `src/export.zig`: add the `dir` column and update its tests.
 
 ## Error handling
