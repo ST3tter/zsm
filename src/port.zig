@@ -87,18 +87,16 @@ pub const Port = struct {
 
     /// Blocking write of all bytes, called from the UI thread. On Windows the
     /// handle is non-overlapped, so this can wait up to ReadTotalTimeoutConstant
-    /// (100ms) behind the reader thread's pending ReadFile.
+    /// (100ms) behind the reader thread's pending ReadFile, and gives up after
+    /// write_timeout_ms if the device stops accepting data.
     pub fn write(self: *Port, bytes: []const u8) !void {
         switch (comptime builtin.target.os.tag) {
             .windows => {
-                var off: usize = 0;
-                while (off < bytes.len) {
-                    var written: std.os.windows.DWORD = 0;
-                    const rest = bytes[off..];
-                    const ok = WriteFile(self.file.handle, rest.ptr, @intCast(rest.len), &written, null);
-                    if (ok == std.os.windows.BOOL.FALSE or written == 0) return error.WriteFailed;
-                    off += written;
-                }
+                var written: std.os.windows.DWORD = 0;
+                const ok = WriteFile(self.file.handle, bytes.ptr, @intCast(bytes.len), &written, null);
+                if (ok == std.os.windows.BOOL.FALSE) return error.WriteFailed;
+                // With a total write timeout set, a short count means it expired.
+                if (written < bytes.len) return error.WriteTimeout;
             },
             else => try self.file.writeStreamingAll(self.io, bytes),
         }
@@ -128,16 +126,24 @@ pub const Port = struct {
     }
 };
 
+// A write gives up after this long, so a device that stops draining its RX
+// buffer can't freeze the UI thread inside WriteFile.
+const write_timeout_ms: std.os.windows.DWORD = 1000;
+
+fn commTimeouts() COMMTIMEOUTS {
+    return .{
+        .ReadIntervalTimeout = std.math.maxInt(std.os.windows.DWORD),
+        .ReadTotalTimeoutMultiplier = std.math.maxInt(std.os.windows.DWORD),
+        .ReadTotalTimeoutConstant = 100,
+        .WriteTotalTimeoutMultiplier = 0,
+        .WriteTotalTimeoutConstant = write_timeout_ms,
+    };
+}
+
 fn setLowLatency(handle: std.posix.fd_t) !void {
     switch (comptime builtin.target.os.tag) {
         .windows => {
-            var t: COMMTIMEOUTS = .{
-                .ReadIntervalTimeout = std.math.maxInt(std.os.windows.DWORD),
-                .ReadTotalTimeoutMultiplier = std.math.maxInt(std.os.windows.DWORD),
-                .ReadTotalTimeoutConstant = 100,
-                .WriteTotalTimeoutMultiplier = 0,
-                .WriteTotalTimeoutConstant = 0,
-            };
+            var t = commTimeouts();
             if (SetCommTimeouts(handle, &t) == std.os.windows.BOOL.FALSE) return error.SetCommTimeoutsFailed;
         },
         .linux, .macos => {
@@ -195,3 +201,11 @@ extern "kernel32" fn CancelIoEx(
     hFile: std.os.windows.HANDLE,
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) std.os.windows.BOOL;
+
+test "serial writes time out instead of blocking forever" {
+    // All-zero write fields mean "no timeout": a device that stops draining
+    // its RX buffer would then freeze the UI thread inside WriteFile.
+    const t = commTimeouts();
+    try std.testing.expect(t.WriteTotalTimeoutConstant > 0);
+    try std.testing.expect(t.WriteTotalTimeoutConstant <= 2000);
+}

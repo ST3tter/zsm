@@ -127,26 +127,30 @@ pub const HistoryLocation = struct {
 pub fn historyLocation(os: std.Target.Os.Tag, env: EnvVars) ?HistoryLocation {
     switch (os) {
         .windows => {
-            const base = nonEmpty(env.appdata) orelse return null;
+            const base = absWindows(env.appdata) orelse return null;
             return .{ .base = base, .sub = "zsm" };
         },
         .macos => {
-            const home = nonEmpty(env.home) orelse return null;
+            const home = absPosix(env.home) orelse return null;
             return .{ .base = home, .sub = "Library/Application Support/zsm" };
         },
         else => {
-            if (nonEmpty(env.xdg_state_home)) |xdg| {
-                if (std.fs.path.isAbsolutePosix(xdg)) return .{ .base = xdg, .sub = "zsm" };
-            }
-            const home = nonEmpty(env.home) orelse return null;
+            if (absPosix(env.xdg_state_home)) |xdg| return .{ .base = xdg, .sub = "zsm" };
+            const home = absPosix(env.home) orelse return null;
             return .{ .base = home, .sub = ".local/state/zsm" };
         },
     }
 }
 
-fn nonEmpty(s: ?[]const u8) ?[]const u8 {
+// Only absolute bases are usable: openDirAbsolute asserts on anything else.
+fn absWindows(s: ?[]const u8) ?[]const u8 {
     const v = s orelse return null;
-    return if (v.len == 0) null else v;
+    return if (std.fs.path.isAbsoluteWindows(v)) v else null;
+}
+
+fn absPosix(s: ?[]const u8) ?[]const u8 {
+    const v = s orelse return null;
+    return if (std.fs.path.isAbsolutePosix(v)) v else null;
 }
 
 pub const KeyResult = enum { consumed, ignored, close, send };
@@ -452,6 +456,15 @@ test "historyLocation falls back and handles missing vars" {
     try testing.expect(historyLocation(.windows, .{ .appdata = "" }) == null);
     try testing.expect(historyLocation(.macos, .{}) == null);
     try testing.expect(historyLocation(.linux, .{}) == null);
+}
+
+test "historyLocation rejects relative base dirs" {
+    // openDirAbsolute asserts on relative paths, so these must not get through.
+    try testing.expect(historyLocation(.windows, .{ .appdata = "C:foo" }) == null);
+    try testing.expect(historyLocation(.windows, .{ .appdata = "AppData" }) == null);
+    try testing.expect(historyLocation(.macos, .{ .home = "rel" }) == null);
+    try testing.expect(historyLocation(.linux, .{ .home = "tmp" }) == null);
+    try testing.expect(historyLocation(.linux, .{ .home = "tmp", .xdg_state_home = "rel" }) == null);
 }
 
 test "history survives save and load" {

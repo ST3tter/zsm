@@ -14,6 +14,7 @@ comptime {
     _ = @import("selection.zig");
     _ = @import("line_render.zig");
     _ = @import("send_bar.zig");
+    _ = @import("port.zig");
 }
 
 pub fn main(init: std.process.Init) !void {
