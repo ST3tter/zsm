@@ -1255,3 +1255,41 @@ fn drawHRule(ctx: vxfw.DrawContext, width: u16) std.mem.Allocator.Error!vxfw.Sur
         .{ .width = width, .height = 1 },
     ));
 }
+
+test "hotkeys are typed into the send bar while it is open" {
+    const m = try std.testing.allocator.create(Monitor);
+    defer std.testing.allocator.destroy(m);
+    m.init(std.testing.allocator, std.testing.io, .{});
+    defer m.deinit();
+
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(std.testing.allocator);
+
+    try std.testing.expect(try m.handleKey(.{ .codepoint = 's', .text = "s" }, &ctx));
+    try std.testing.expect(m.send_bar_open);
+
+    inline for ("coef") |ch| {
+        try std.testing.expect(try m.handleKey(.{ .codepoint = ch, .text = &[_]u8{ch} }, &ctx));
+    }
+    try std.testing.expect(try m.handleKey(.{ .codepoint = vaxis.Key.tab }, &ctx));
+
+    // None of the hotkeys fired...
+    try std.testing.expect(!m.overlay_open);
+    try std.testing.expect(!m.save_prompt_open);
+    try std.testing.expect(m.follow);
+    try std.testing.expectEqual(DisplayMode.string, m.display_mode);
+    // ...they went into the bar, and Tab changed the ending instead of the view.
+    const text = try m.send_bar.currentText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("coef", text);
+    try std.testing.expectEqual(types.Terminator.lf, m.send_bar.ending);
+
+    // Ctrl+C is not consumed, so App still quits.
+    try std.testing.expect(!try m.handleKey(.{ .codepoint = 'c', .mods = .{ .ctrl = true } }, &ctx));
+
+    // Esc closes the bar; then 'f' is a hotkey again.
+    try std.testing.expect(try m.handleKey(.{ .codepoint = vaxis.Key.escape }, &ctx));
+    try std.testing.expect(!m.send_bar_open);
+    try std.testing.expect(try m.handleKey(.{ .codepoint = 'f', .text = "f" }, &ctx));
+    try std.testing.expect(!m.follow);
+}

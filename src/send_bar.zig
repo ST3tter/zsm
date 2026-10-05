@@ -533,3 +533,63 @@ test "a history file that failed to load is not overwritten" {
     defer testing.allocator.free(after);
     try testing.expectEqual(big.len, after.len);
 }
+
+fn testKeyCtx() vxfw.EventContext {
+    return .{ .io = testing.io, .alloc = testing.allocator, .cmds = .empty };
+}
+
+fn typeKey(bar: *SendBar, ctx: *vxfw.EventContext, comptime ch: u8) KeyResult {
+    return bar.handleKey(.{ .codepoint = ch, .text = &[_]u8{ch} }, ctx);
+}
+
+test "handleKey types text, cycles ending, and reports send/close" {
+    var bar = SendBar.init(testing.allocator, testing.io, .{});
+    defer bar.deinit();
+    var ctx = testKeyCtx();
+    defer ctx.cmds.deinit(testing.allocator);
+
+    try testing.expectEqual(KeyResult.consumed, typeKey(&bar, &ctx, 'c'));
+    try testing.expectEqual(KeyResult.consumed, typeKey(&bar, &ctx, 'o'));
+    const text = try bar.currentText(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("co", text);
+
+    try testing.expectEqual(KeyResult.consumed, bar.handleKey(.{ .codepoint = vaxis.Key.tab }, &ctx));
+    try testing.expectEqual(types.Terminator.lf, bar.ending);
+
+    try testing.expectEqual(KeyResult.send, bar.handleKey(.{ .codepoint = vaxis.Key.enter }, &ctx));
+    try testing.expectEqual(KeyResult.close, bar.handleKey(.{ .codepoint = vaxis.Key.escape }, &ctx));
+}
+
+test "handleKey leaves Ctrl+C to the app" {
+    var bar = SendBar.init(testing.allocator, testing.io, .{});
+    defer bar.deinit();
+    var ctx = testKeyCtx();
+    defer ctx.cmds.deinit(testing.allocator);
+    try testing.expectEqual(KeyResult.ignored, bar.handleKey(.{ .codepoint = 'c', .mods = .{ .ctrl = true } }, &ctx));
+}
+
+test "handleKey recalls history with up and down" {
+    var bar = SendBar.init(testing.allocator, testing.io, .{});
+    defer bar.deinit();
+    try bar.history.push("AT");
+    try bar.history.push("ATI");
+    var ctx = testKeyCtx();
+    defer ctx.cmds.deinit(testing.allocator);
+
+    _ = typeKey(&bar, &ctx, 'x');
+    _ = bar.handleKey(.{ .codepoint = vaxis.Key.up }, &ctx);
+    _ = bar.handleKey(.{ .codepoint = vaxis.Key.up }, &ctx);
+    {
+        const t = try bar.currentText(testing.allocator);
+        defer testing.allocator.free(t);
+        try testing.expectEqualStrings("AT", t);
+    }
+    _ = bar.handleKey(.{ .codepoint = vaxis.Key.down }, &ctx);
+    _ = bar.handleKey(.{ .codepoint = vaxis.Key.down }, &ctx);
+    {
+        const t = try bar.currentText(testing.allocator);
+        defer testing.allocator.free(t);
+        try testing.expectEqualStrings("x", t);
+    }
+}
