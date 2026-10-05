@@ -8,6 +8,44 @@ const types = @import("types.zig");
 pub const ring_capacity: usize = 1024;
 pub const EventRing = ring_mod.SpscRing(types.Event, ring_capacity);
 
+pub const tx_capacity: usize = 4096;
+
+pub const TxFailure = enum(u8) { none, failed, timeout };
+
+/// Bytes waiting to be written to the port. The UI thread enqueues, the
+/// reader thread drains and does the actual write, so the two never contend
+/// for the (synchronous) handle.
+pub const TxQueue = struct {
+    ring: ring_mod.SpscRing(u8, tx_capacity) = .{},
+    // Last write failure, set by the reader thread, taken by the UI thread.
+    failure: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(TxFailure.none)),
+
+    /// All-or-nothing, so a command is never sent truncated.
+    pub fn enqueue(self: *TxQueue, bytes: []const u8) bool {
+        if (bytes.len > self.ring.freeSlots()) return false;
+        for (bytes) |b| _ = self.ring.push(b);
+        return true;
+    }
+
+    /// Pop up to out.len queued bytes, oldest first.
+    pub fn drain(self: *TxQueue, out: []u8) []u8 {
+        var n: usize = 0;
+        while (n < out.len) : (n += 1) {
+            out[n] = self.ring.pop() orelse break;
+        }
+        return out[0..n];
+    }
+
+    pub fn fail(self: *TxQueue, f: TxFailure) void {
+        self.failure.store(@backingInt(f), .release);
+    }
+
+    pub fn takeFailure(self: *TxQueue) ?TxFailure {
+        const f: TxFailure = @fromBackingInt(@intCast(self.failure.swap(@backingInt(TxFailure.none), .acq_rel)));
+        return if (f == .none) null else f;
+    }
+};
+
 pub const Port = struct {
     id: u8,
     file: std.Io.File,
@@ -21,6 +59,7 @@ pub const Port = struct {
     dropped: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     ring: *EventRing,
+    tx: TxQueue = .{},
 
     thread: ?std.Thread = null,
 
@@ -85,11 +124,29 @@ pub const Port = struct {
         return self.dropped.load(.monotonic);
     }
 
-    /// Blocking write of all bytes, called from the UI thread. On Windows the
-    /// handle is non-overlapped, so this can wait up to ReadTotalTimeoutConstant
-    /// (100ms) behind the reader thread's pending ReadFile, and gives up after
-    /// write_timeout_ms if the device stops accepting data.
-    pub fn write(self: *Port, bytes: []const u8) !void {
+    /// Queue bytes for the reader thread to write; never blocks. They go out
+    /// before the next read, i.e. within ReadTotalTimeoutConstant (100ms).
+    /// Write failures surface later via tx.takeFailure().
+    pub fn send(self: *Port, bytes: []const u8) error{TxQueueFull}!void {
+        if (!self.tx.enqueue(bytes)) return error.TxQueueFull;
+    }
+
+    // Reader thread only. Windows serializes I/O on a synchronous handle, so
+    // writing from the thread that also reads avoids queueing behind ReadFile.
+    fn flushTx(self: *Port) void {
+        var chunk_buf: [256]u8 = undefined;
+        while (true) {
+            const chunk = self.tx.drain(&chunk_buf);
+            if (chunk.len == 0) return;
+            self.writeNow(chunk) catch |err| {
+                self.tx.fail(if (err == error.WriteTimeout) .timeout else .failed);
+            };
+        }
+    }
+
+    /// Blocking write of all bytes; gives up after write_timeout_ms on Windows
+    /// if the device stops accepting data.
+    fn writeNow(self: *Port, bytes: []const u8) !void {
         switch (comptime builtin.target.os.tag) {
             .windows => {
                 var written: std.os.windows.DWORD = 0;
@@ -105,6 +162,7 @@ pub const Port = struct {
     fn readerThread(self: *Port) void {
         var buf: [types.event_payload_bytes]u8 = undefined;
         while (self.running.load(.acquire) == 1) {
+            self.flushTx();
             const n = rawRead(self.file.handle, &buf) catch {
                 self.state.store(@backingInt(types.PortState.errored), .release);
                 return;
@@ -208,4 +266,33 @@ test "serial writes time out instead of blocking forever" {
     const t = commTimeouts();
     try std.testing.expect(t.WriteTotalTimeoutConstant > 0);
     try std.testing.expect(t.WriteTotalTimeoutConstant <= 2000);
+}
+
+test "TxQueue enqueues whole commands or nothing" {
+    var q: TxQueue = .{};
+    const big: [tx_capacity]u8 = @splat('x');
+    try std.testing.expect(!q.enqueue(&big));
+    var out: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), q.drain(&out).len);
+
+    try std.testing.expect(q.enqueue("AT\r\n"));
+    try std.testing.expectEqualStrings("AT\r\n", q.drain(&out));
+    try std.testing.expectEqual(@as(usize, 0), q.drain(&out).len);
+}
+
+test "TxQueue drains in order in chunks of the buffer size" {
+    var q: TxQueue = .{};
+    try std.testing.expect(q.enqueue("abc"));
+    try std.testing.expect(q.enqueue("def"));
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("abcd", q.drain(&out));
+    try std.testing.expectEqualStrings("ef", q.drain(&out));
+}
+
+test "TxQueue failure is reported once" {
+    var q: TxQueue = .{};
+    try std.testing.expect(q.takeFailure() == null);
+    q.fail(.timeout);
+    try std.testing.expectEqual(TxFailure.timeout, q.takeFailure().?);
+    try std.testing.expect(q.takeFailure() == null);
 }

@@ -34,6 +34,14 @@ pub fn SpscRing(comptime T: type, comptime capacity: usize) type {
             return item;
         }
 
+        /// Producer side: how many more pushes are guaranteed to succeed. The
+        /// consumer can only free slots concurrently, so this never overstates.
+        pub fn freeSlots(self: *Self) usize {
+            const h = self.head.load(.monotonic);
+            const t = self.tail.load(.acquire);
+            return mask - ((h -% t) & mask);
+        }
+
         pub fn hasItem(self: *Self) bool {
             const t = self.tail.load(.monotonic);
             return t != self.head.load(.acquire);
@@ -58,4 +66,14 @@ test "drops when full" {
     try std.testing.expect(ring.push(2));
     try std.testing.expect(ring.push(3));
     try std.testing.expect(!ring.push(4));
+}
+
+test "freeSlots reports remaining capacity" {
+    var ring: SpscRing(u32, 4) = .{};
+    try std.testing.expectEqual(@as(usize, 3), ring.freeSlots());
+    _ = ring.push(1);
+    _ = ring.push(2);
+    try std.testing.expectEqual(@as(usize, 1), ring.freeSlots());
+    _ = ring.pop();
+    try std.testing.expectEqual(@as(usize, 2), ring.freeSlots());
 }

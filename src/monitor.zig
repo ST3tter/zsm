@@ -315,6 +315,13 @@ pub const Monitor = struct {
         var changed = false;
         for (0..self.ports.len) |i| {
             const p = self.ports[i] orelse continue;
+            if (p.tx.takeFailure()) |f| {
+                self.setExportMessage(switch (f) {
+                    .timeout => "send failed: device not accepting data",
+                    else => "send failed",
+                }, true);
+                changed = true;
+            }
             if (p.getState() == .errored) {
                 self.disconnectSlot(@intCast(i));
                 changed = true;
@@ -1140,8 +1147,9 @@ pub const Monitor = struct {
         }
     }
 
-    // Write the input plus the chosen ending to D0 and echo it as a TX line.
-    // On failure the input is kept so the user can retry.
+    // Queue the input plus the chosen ending for D0 and echo it as a TX line.
+    // The reader thread does the write; failures show up via healthTick. If
+    // the command can't be queued, the input is kept so the user can retry.
     fn sendToD0(self: *Monitor) void {
         var arena_state: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena_state.deinit();
@@ -1157,14 +1165,13 @@ pub const Monitor = struct {
             return;
         };
         const payload = std.mem.concat(arena, u8, &.{ text, term }) catch return;
-        port.write(payload) catch |err| {
-            var buf: [128]u8 = undefined;
-            const m = std.fmt.bufPrint(&buf, "send failed: {s}", .{@errorName(err)}) catch "send failed";
-            self.setExportMessage(m, true);
+        // Stamp before queueing so the echo always sorts before its reply.
+        const now: u64 = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
+        port.send(payload) catch {
+            self.setExportMessage("send: queue full, try again", true);
             return;
         };
 
-        const now: u64 = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
         const owned = self.allocator.dupe(u8, text) catch return;
         self.appendLine(.{
             .port_id = 0,
