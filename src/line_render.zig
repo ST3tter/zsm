@@ -8,15 +8,18 @@ const fmt = @import("fmt.zig");
 
 const inspector_min_body_w: u16 = 16;
 
-/// Device tag between timestamp and body, e.g. " [D0] ". Identical for sent
-/// and received lines so columns line up; TX lines get pushTxMarker instead.
+/// Tag between timestamp and body: " [D0] " for device output, " [TX] " for
+/// commands we sent. Both are the same width so columns line up.
 pub fn devLabel(arena: std.mem.Allocator, line: types.Line) ![]const u8 {
-    return arena.print(" [D{d}] ", .{line.port_id});
+    return switch (line.direction) {
+        .rx => arena.print(" [D{d}] ", .{line.port_id}),
+        .tx => " [TX] ",
+    };
 }
 
-// Leading "→ " on commands we sent, in the TX accent.
-fn pushTxMarker(arena: std.mem.Allocator, list: *std.ArrayList(vxfw.RichText.TextSpan), line: types.Line) !void {
-    if (line.direction == .tx) try list.append(arena, .{ .text = "→ ", .style = theme.tx });
+// Sent lines use the TX accent for the tag instead of the port colour.
+fn tagStyle(line: types.Line, dev_style: vaxis.Style) vaxis.Style {
+    return if (line.direction == .tx) theme.tx_tag else dev_style;
 }
 
 fn bodyStyle(line: types.Line) vaxis.Style {
@@ -34,8 +37,7 @@ pub fn drawString(
 ) std.mem.Allocator.Error!vxfw.Surface {
     var spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
-    try spans.append(arena, .{ .text = dev_text, .style = dev_style });
-    try pushTxMarker(arena, &spans, line);
+    try spans.append(arena, .{ .text = dev_text, .style = tagStyle(line, dev_style) });
     try pushBodySpans(arena, &spans, line.text, bodyStyle(line));
     try spans.append(arena, .{ .text = term_text, .style = theme.subtitle });
 
@@ -59,8 +61,7 @@ pub fn drawHexOnly(
 ) std.mem.Allocator.Error!vxfw.Surface {
     var spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
-    try spans.append(arena, .{ .text = dev_text, .style = dev_style });
-    try pushTxMarker(arena, &spans, line);
+    try spans.append(arena, .{ .text = dev_text, .style = tagStyle(line, dev_style) });
     try buildHexSpans(arena, &spans, line.text, bodyStyle(line));
     const term_bytes = types.terminatorBytes(line.terminator);
     if (line.text.len > 0 and term_bytes.len > 0) {
@@ -105,8 +106,7 @@ pub fn drawStringAndHex(
 
     var left_spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try left_spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
-    try left_spans.append(arena, .{ .text = dev_text, .style = dev_style });
-    try pushTxMarker(arena, &left_spans, line);
+    try left_spans.append(arena, .{ .text = dev_text, .style = tagStyle(line, dev_style) });
     try pushBodySpans(arena, &left_spans, line.text, bodyStyle(line));
     try left_spans.append(arena, .{ .text = term_text, .style = theme.subtitle });
 
@@ -233,7 +233,7 @@ fn testCtx(arena: std.mem.Allocator, width: u16) vxfw.DrawContext {
     };
 }
 
-test "devLabel is the same width for TX and RX" {
+test "devLabel tags sent lines as TX, same width as the device tag" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -242,10 +242,10 @@ test "devLabel is the same width for TX and RX" {
     const rx: types.Line = .{ .port_id = 2, .timestamp_ns = 0, .text = &text };
     const tx: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text, .direction = .tx };
     try std.testing.expectEqualStrings(" [D2] ", try devLabel(arena, rx));
-    try std.testing.expectEqualStrings(" [D0] ", try devLabel(arena, tx));
+    try std.testing.expectEqualStrings(" [TX] ", try devLabel(arena, tx));
 }
 
-test "TX arrow is drawn in the accent style" {
+test "TX tag is drawn in the accent style, not the port colour" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -257,9 +257,9 @@ test "TX arrow is drawn in the accent style" {
     const cells = try arena.alloc(vaxis.Cell, 30);
     @memset(cells, .{ .default = true });
     selection.flattenRow(surf, 0, cells);
-    // 12-cell timestamp + 6-cell " [D0] " label, then the arrow.
-    try std.testing.expectEqualStrings("→", cells[18].char.grapheme);
-    try std.testing.expectEqual(theme.tx.fg, cells[18].style.fg);
+    // 12-cell timestamp, then " [TX] " — 'T' is at 14.
+    try std.testing.expectEqualStrings("T", cells[14].char.grapheme);
+    try std.testing.expectEqual(theme.tx.fg, cells[14].style.fg);
 }
 
 fn separatorCol(arena: std.mem.Allocator, line: types.Line, width: u16) !usize {
@@ -284,7 +284,7 @@ test "string+hex separator lines up for TX and RX rows" {
     try std.testing.expectEqual(try separatorCol(arena, rx, 100), try separatorCol(arena, tx, 100));
 }
 
-test "TX line renders with marker and accent body" {
+test "TX line renders with TX tag and accent body" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -299,14 +299,14 @@ test "TX line renders with marker and accent body" {
     };
     const dev = try devLabel(arena, line);
     const surf = try drawString(arena, testCtx(arena, 40), line, "00:00:00.000", dev, types.terminatorNotation(line.terminator), .{});
-    try std.testing.expectEqualStrings("00:00:00.000 [D0] → AT+GMR\\r\\n", try renderedText(arena, surf, 40));
+    try std.testing.expectEqualStrings("00:00:00.000 [TX] AT+GMR\\r\\n", try renderedText(arena, surf, 40));
 
-    // 'A' sits after the 12-cell timestamp and the 8-cell " [D0] → " label.
+    // 'A' sits after the 12-cell timestamp and the 6-cell " [TX] " label.
     const cells = try arena.alloc(vaxis.Cell, 40);
     @memset(cells, .{ .default = true });
     selection.flattenRow(surf, 0, cells);
-    try std.testing.expectEqualStrings("A", cells[20].char.grapheme);
-    try std.testing.expectEqual(theme.tx.fg, cells[20].style.fg);
+    try std.testing.expectEqualStrings("A", cells[18].char.grapheme);
+    try std.testing.expectEqual(theme.tx.fg, cells[18].style.fg);
 }
 
 test "RX line body keeps the normal style" {

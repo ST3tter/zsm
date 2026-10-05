@@ -12,6 +12,7 @@ pub const subtitle: vaxis.Style = .{ .fg = dim_fg };
 pub const selected: vaxis.Style = .{ .fg = accent, .bold = true };
 pub const normal: vaxis.Style = .{};
 pub const tx: vaxis.Style = .{ .fg = accent };
+pub const tx_tag: vaxis.Style = .{ .fg = accent, .bold = true };
 
 pub const status_idle: vaxis.Style = .{ .fg = dim_fg };
 pub const status_ok: vaxis.Style = .{ .fg = ok_c };
