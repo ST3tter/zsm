@@ -8,13 +8,15 @@ const fmt = @import("fmt.zig");
 
 const inspector_min_body_w: u16 = 16;
 
-/// Device tag between timestamp and body: " [D0] " for received lines,
-/// " [D0] → " for commands we sent.
+/// Device tag between timestamp and body, e.g. " [D0] ". Identical for sent
+/// and received lines so columns line up; TX lines get pushTxMarker instead.
 pub fn devLabel(arena: std.mem.Allocator, line: types.Line) ![]const u8 {
-    return switch (line.direction) {
-        .rx => arena.print(" [D{d}] ", .{line.port_id}),
-        .tx => arena.print(" [D{d}] → ", .{line.port_id}),
-    };
+    return arena.print(" [D{d}] ", .{line.port_id});
+}
+
+// Leading "→ " on commands we sent, in the TX accent.
+fn pushTxMarker(arena: std.mem.Allocator, list: *std.ArrayList(vxfw.RichText.TextSpan), line: types.Line) !void {
+    if (line.direction == .tx) try list.append(arena, .{ .text = "→ ", .style = theme.tx });
 }
 
 fn bodyStyle(line: types.Line) vaxis.Style {
@@ -33,6 +35,7 @@ pub fn drawString(
     var spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
     try spans.append(arena, .{ .text = dev_text, .style = dev_style });
+    try pushTxMarker(arena, &spans, line);
     try pushBodySpans(arena, &spans, line.text, bodyStyle(line));
     try spans.append(arena, .{ .text = term_text, .style = theme.subtitle });
 
@@ -57,6 +60,7 @@ pub fn drawHexOnly(
     var spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
     try spans.append(arena, .{ .text = dev_text, .style = dev_style });
+    try pushTxMarker(arena, &spans, line);
     try buildHexSpans(arena, &spans, line.text, bodyStyle(line));
     const term_bytes = types.terminatorBytes(line.terminator);
     if (line.text.len > 0 and term_bytes.len > 0) {
@@ -102,6 +106,7 @@ pub fn drawStringAndHex(
     var left_spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try left_spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
     try left_spans.append(arena, .{ .text = dev_text, .style = dev_style });
+    try pushTxMarker(arena, &left_spans, line);
     try pushBodySpans(arena, &left_spans, line.text, bodyStyle(line));
     try left_spans.append(arena, .{ .text = term_text, .style = theme.subtitle });
 
@@ -228,7 +233,7 @@ fn testCtx(arena: std.mem.Allocator, width: u16) vxfw.DrawContext {
     };
 }
 
-test "devLabel marks TX lines with an arrow" {
+test "devLabel is the same width for TX and RX" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -237,7 +242,46 @@ test "devLabel marks TX lines with an arrow" {
     const rx: types.Line = .{ .port_id = 2, .timestamp_ns = 0, .text = &text };
     const tx: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text, .direction = .tx };
     try std.testing.expectEqualStrings(" [D2] ", try devLabel(arena, rx));
-    try std.testing.expectEqualStrings(" [D0] → ", try devLabel(arena, tx));
+    try std.testing.expectEqualStrings(" [D0] ", try devLabel(arena, tx));
+}
+
+test "TX arrow is drawn in the accent style" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var text = "AT".*;
+    const line: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text, .terminator = .none, .direction = .tx };
+    const dev_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 1, 2, 3 } }, .bold = true };
+    const surf = try drawString(arena, testCtx(arena, 30), line, "00:00:00.000", try devLabel(arena, line), "", dev_style);
+    const cells = try arena.alloc(vaxis.Cell, 30);
+    @memset(cells, .{ .default = true });
+    selection.flattenRow(surf, 0, cells);
+    // 12-cell timestamp + 6-cell " [D0] " label, then the arrow.
+    try std.testing.expectEqualStrings("→", cells[18].char.grapheme);
+    try std.testing.expectEqual(theme.tx.fg, cells[18].style.fg);
+}
+
+fn separatorCol(arena: std.mem.Allocator, line: types.Line, width: u16) !usize {
+    const surf = try drawStringAndHex(arena, testCtx(arena, width), line, "00:00:00.000", try devLabel(arena, line), types.terminatorNotation(line.terminator), .{}, undefined);
+    const cells = try arena.alloc(vaxis.Cell, width);
+    @memset(cells, .{ .default = true });
+    selection.flattenRow(surf, 0, cells);
+    for (cells, 0..) |c, i| {
+        if (!c.default and std.mem.eql(u8, c.char.grapheme, "│")) return i;
+    }
+    return error.NoSeparator;
+}
+
+test "string+hex separator lines up for TX and RX rows" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var text = "AT".*;
+    const rx: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text };
+    const tx: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text, .direction = .tx };
+    try std.testing.expectEqual(try separatorCol(arena, rx, 100), try separatorCol(arena, tx, 100));
 }
 
 test "TX line renders with marker and accent body" {
