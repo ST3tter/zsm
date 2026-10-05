@@ -419,10 +419,11 @@ pub const Monitor = struct {
             return hints;
         }
         const follow_label: []const u8 = if (self.follow) "follow:on" else "follow:off";
+        // Current mode, like follow_label (Tab switches to the next one).
         const view_label: []const u8 = switch (self.display_mode) {
-            .string => "view:string+hex",
-            .string_and_hex => "view:hex",
-            .hex_only => "view:string",
+            .string => "view:string",
+            .string_and_hex => "view:string+hex",
+            .hex_only => "view:hex",
         };
         const hints = try arena.alloc(KeyHint, if (self.sel_active) 8 else 7);
         hints[0] = .{ .key = "o", .label = "open" };
@@ -1394,4 +1395,32 @@ test "dragging selects text without moving the cursor" {
     try std.testing.expect(m.sel_active);
     try std.testing.expectEqual(@as(u32, 2), m.list_view.cursor);
     try std.testing.expect(m.follow);
+}
+
+fn hintLabel(hints: []const KeyHint, key: []const u8) ?[]const u8 {
+    for (hints) |h| {
+        if (std.mem.eql(u8, h.key, key)) return h.label;
+    }
+    return null;
+}
+
+test "footer hints show the current view mode, like follow" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const m = try std.testing.allocator.create(Monitor);
+    defer std.testing.allocator.destroy(m);
+    m.init(std.testing.allocator, std.testing.io, .{});
+    defer m.deinit();
+
+    const expected = [_]struct { mode: DisplayMode, label: []const u8 }{
+        .{ .mode = .string, .label = "view:string" },
+        .{ .mode = .string_and_hex, .label = "view:string+hex" },
+        .{ .mode = .hex_only, .label = "view:hex" },
+    };
+    for (expected) |e| {
+        m.display_mode = e.mode;
+        try std.testing.expectEqualStrings(e.label, hintLabel(try m.keyHints(arena), "Tab").?);
+    }
+    try std.testing.expectEqualStrings("follow:on", hintLabel(try m.keyHints(arena), "f").?);
 }
