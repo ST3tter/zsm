@@ -3,6 +3,11 @@
 //! itself is wired into Monitor.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const vaxis = @import("vaxis");
+const vxfw = vaxis.vxfw;
+
+const theme = @import("theme.zig");
 const types = @import("types.zig");
 
 pub const max_history_entries: usize = 200;
@@ -144,6 +149,180 @@ fn nonEmpty(s: ?[]const u8) ?[]const u8 {
     return if (v.len == 0) null else v;
 }
 
+pub const KeyResult = enum { consumed, ignored, close, send };
+
+pub const SendBar = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+
+    input: vxfw.TextField,
+    ending: types.Terminator = .crlf,
+    history: History,
+    // Set by Monitor before each draw; only changes the prompt text.
+    d0_connected: bool = false,
+
+    // Owned copy of the base directory; null = no persistent history.
+    location: ?HistoryLocation = null,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, env: EnvVars) SendBar {
+        var input = vxfw.TextField.init(allocator);
+        input.style = theme.normal;
+        var self: SendBar = .{
+            .allocator = allocator,
+            .io = io,
+            .input = input,
+            .history = History.init(allocator),
+        };
+        if (historyLocation(builtin.target.os.tag, env)) |loc| {
+            if (allocator.dupe(u8, loc.base)) |base| {
+                self.location = .{ .base = base, .sub = loc.sub };
+            } else |_| {}
+        }
+        self.loadHistory();
+        return self;
+    }
+
+    pub fn deinit(self: *SendBar) void {
+        if (self.location) |loc| self.allocator.free(loc.base);
+        self.history.deinit();
+        self.input.deinit();
+    }
+
+    pub fn handleKey(self: *SendBar, key: vaxis.Key, ctx: *vxfw.EventContext) KeyResult {
+        if (key.matches(vaxis.Key.escape, .{})) return .close;
+        if (key.matches(vaxis.Key.enter, .{})) return .send;
+        if (key.matches(vaxis.Key.tab, .{})) {
+            self.ending = nextEnding(self.ending);
+            return .consumed;
+        }
+        if (key.matches(vaxis.Key.up, .{})) {
+            const current = self.currentText(self.allocator) catch return .consumed;
+            defer self.allocator.free(current);
+            const entry = (self.history.prev(current) catch return .consumed) orelse return .consumed;
+            self.setText(entry);
+            return .consumed;
+        }
+        if (key.matches(vaxis.Key.down, .{})) {
+            if (self.history.next()) |entry| self.setText(entry);
+            return .consumed;
+        }
+        const outer_consumed = ctx.consume_event;
+        ctx.consume_event = false;
+        self.input.handleEvent(ctx, .{ .key_press = key }) catch {};
+        const field_consumed = ctx.consume_event;
+        ctx.consume_event = field_consumed or outer_consumed;
+        return if (field_consumed) .consumed else .ignored;
+    }
+
+    /// Current input text (gap buffer joined). Caller owns the copy.
+    pub fn currentText(self: *const SendBar, alloc: std.mem.Allocator) ![]u8 {
+        return std.mem.concat(alloc, u8, &.{
+            self.input.buf.firstHalf(),
+            self.input.buf.secondHalf(),
+        });
+    }
+
+    /// After a successful send: remember the command and clear the input.
+    pub fn commitSent(self: *SendBar, text: []const u8) void {
+        self.history.push(text) catch {};
+        self.saveHistory();
+        self.input.clearRetainingCapacity();
+    }
+
+    fn setText(self: *SendBar, text: []const u8) void {
+        self.input.clearRetainingCapacity();
+        self.input.insertSliceAtCursor(text) catch {};
+    }
+
+    pub fn loadHistoryFrom(self: *SendBar, dir: std.Io.Dir) void {
+        const data = dir.readFileAlloc(self.io, history_file_name, self.allocator, .limited(1 << 20)) catch return;
+        defer self.allocator.free(data);
+        self.history.load(data) catch {};
+    }
+
+    pub fn saveHistoryTo(self: *SendBar, dir: std.Io.Dir) void {
+        const data = self.history.serialize(self.allocator) catch return;
+        defer self.allocator.free(data);
+        dir.writeFile(self.io, .{ .sub_path = history_file_name, .data = data }) catch {};
+    }
+
+    fn loadHistory(self: *SendBar) void {
+        var dir = self.openHistoryDir(false) orelse return;
+        defer dir.close(self.io);
+        self.loadHistoryFrom(dir);
+    }
+
+    fn saveHistory(self: *SendBar) void {
+        var dir = self.openHistoryDir(true) orelse return;
+        defer dir.close(self.io);
+        self.saveHistoryTo(dir);
+    }
+
+    fn openHistoryDir(self: *SendBar, create: bool) ?std.Io.Dir {
+        const loc = self.location orelse return null;
+        var base = std.Io.Dir.openDirAbsolute(self.io, loc.base, .{}) catch return null;
+        defer base.close(self.io);
+        if (create) return base.createDirPathOpen(self.io, loc.sub, .{}) catch null;
+        return base.openDir(self.io, loc.sub, .{}) catch null;
+    }
+
+    pub fn widget(self: *SendBar) vxfw.Widget {
+        return .{ .userdata = self, .drawFn = drawFn };
+    }
+
+    // One row: "D0 ❯ <input>                [\r\n]"
+    fn drawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *SendBar = @ptrCast(@alignCast(ptr));
+        const max = ctx.max.size();
+        const arena = ctx.arena;
+
+        const prompt: []const u8 = if (self.d0_connected) " D0 ❯ " else " D0 (not connected) ❯ ";
+        const prompt_style: vaxis.Style = if (self.d0_connected) theme.title else theme.status_err;
+        const notation = types.terminatorNotation(self.ending);
+        const label = try arena.print(" [{s}] ", .{if (notation.len == 0) "none" else notation});
+
+        const prompt_w: u16 = @intCast(@min(ctx.stringWidth(prompt), max.width));
+        const label_w: u16 = @intCast(@min(ctx.stringWidth(label), max.width -| prompt_w));
+        const field_w: u16 = max.width -| prompt_w -| label_w;
+
+        const prompt_txt = vxfw.Text{ .text = prompt, .style = prompt_style, .softwrap = false, .overflow = .clip };
+        const prompt_surf = try prompt_txt.draw(ctx.withConstraints(
+            .{ .width = 0, .height = 1 },
+            .{ .width = prompt_w, .height = 1 },
+        ));
+
+        // The bar isn't the vxfw-focused widget, so the hardware cursor never
+        // shows — paint a block cursor like SavePrompt does.
+        var field_surf = try self.input.draw(ctx.withConstraints(
+            .{ .width = field_w, .height = 1 },
+            .{ .width = field_w, .height = 1 },
+        ));
+        if (field_surf.cursor) |cur| {
+            if (cur.col < field_surf.size.width) {
+                field_surf.buffer[cur.col].style.reverse = true;
+            }
+        }
+
+        const label_txt = vxfw.Text{ .text = label, .style = theme.subtitle, .softwrap = false, .overflow = .clip };
+        const label_surf = try label_txt.draw(ctx.withConstraints(
+            .{ .width = 0, .height = 1 },
+            .{ .width = label_w, .height = 1 },
+        ));
+
+        const children = try arena.alloc(vxfw.SubSurface, 3);
+        children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = prompt_surf };
+        children[1] = .{ .origin = .{ .row = 0, .col = @intCast(prompt_w) }, .surface = field_surf };
+        children[2] = .{ .origin = .{ .row = 0, .col = @intCast(prompt_w + field_w) }, .surface = label_surf };
+
+        return .{
+            .size = .{ .width = max.width, .height = 1 },
+            .widget = self.widget(),
+            .buffer = &.{},
+            .children = children,
+        };
+    }
+};
+
 const testing = std.testing;
 
 test "push ignores empty and repeated commands" {
@@ -273,4 +452,32 @@ test "historyLocation falls back and handles missing vars" {
     try testing.expect(historyLocation(.windows, .{ .appdata = "" }) == null);
     try testing.expect(historyLocation(.macos, .{}) == null);
     try testing.expect(historyLocation(.linux, .{}) == null);
+}
+
+test "history survives save and load" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var a = SendBar.init(testing.allocator, testing.io, .{});
+    defer a.deinit();
+    try a.history.push("AT");
+    try a.history.push("Grüße");
+    a.saveHistoryTo(tmp.dir);
+
+    var b = SendBar.init(testing.allocator, testing.io, .{});
+    defer b.deinit();
+    b.loadHistoryFrom(tmp.dir);
+    try testing.expectEqual(@as(usize, 2), b.history.entries.items.len);
+    try testing.expectEqualStrings("AT", b.history.entries.items[0]);
+    try testing.expectEqualStrings("Grüße", b.history.entries.items[1]);
+}
+
+test "loading a missing history file leaves history empty" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var bar = SendBar.init(testing.allocator, testing.io, .{});
+    defer bar.deinit();
+    bar.loadHistoryFrom(tmp.dir);
+    try testing.expectEqual(@as(usize, 0), bar.history.entries.items.len);
 }
