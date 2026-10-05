@@ -40,6 +40,8 @@ pub const Line = struct {
     timestamp_ns: u64,
     text: []u8,
     terminator: Terminator = .lf,
+    // Assigned by Monitor.appendLine; stable identity for mouse selection.
+    seq: u64 = 0,
 };
 
 pub const PortState = enum {

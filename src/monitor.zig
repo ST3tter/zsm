@@ -14,6 +14,7 @@ const inspector = @import("inspector.zig");
 const line_render = @import("line_render.zig");
 const exp = @import("export.zig");
 const save_prompt_mod = @import("save_prompt.zig");
+const selection = @import("selection.zig");
 
 pub const max_history: usize = 10000;
 
@@ -36,6 +37,28 @@ pub const port_colors = [_]vaxis.Color{
 const LineEntry = struct {
     monitor: *Monitor,
     slot_idx: usize,
+};
+
+// Columns ListView reserves for its cursor indicator (draw_cursor = true).
+const list_cursor_cols: u16 = 2;
+
+// A line row as laid out in the last frame, in Monitor-local coordinates.
+// Used to map mouse positions to lines; `surface` is only valid during draw.
+const VisibleLine = struct {
+    row: i32,
+    col: i32,
+    height: u16,
+    slot_idx: usize,
+    seq: u64,
+    surface: vxfw.Surface,
+};
+
+// Selection resolved to logical line indices, in reading order.
+const SelectionRange = struct {
+    start_idx: usize,
+    start_col: u16,
+    end_idx: usize,
+    end_col: u16,
 };
 
 pub const Monitor = struct {
@@ -78,6 +101,16 @@ pub const Monitor = struct {
     export_message_until_ns: u64 = 0,
     export_message_is_error: bool = false,
 
+    // Mouse text selection. `sel_anchor` is where the drag started, `sel_head`
+    // where it is now; `sel_active` is false for a plain click (no drag yet).
+    next_seq: u64 = 0,
+    sel_anchor: selection.Point = .{ .seq = 0, .col = 0 },
+    sel_head: selection.Point = .{ .seq = 0, .col = 0 },
+    sel_active: bool = false,
+    dragging: bool = false,
+    visible: std.ArrayList(VisibleLine) = .empty,
+    line_width: u16 = 0,
+
     pub fn init(self: *Monitor, allocator: std.mem.Allocator, io: std.Io) void {
         self.allocator = allocator;
         self.io = io;
@@ -103,6 +136,11 @@ pub const Monitor = struct {
         self.save_prompt_open = false;
         self.follow = true;
         self.display_mode = .string;
+        self.next_seq = 0;
+        self.sel_active = false;
+        self.dragging = false;
+        self.visible = .empty;
+        self.line_width = 0;
 
         for (0..max_history) |i| {
             self.line_entries[i] = .{ .monitor = self, .slot_idx = i };
@@ -130,10 +168,11 @@ pub const Monitor = struct {
         self.lines_count = 0;
         self.overlay.deinit();
         self.save_prompt.deinit();
+        self.visible.deinit(self.allocator);
     }
 
     pub fn widget(self: *Monitor) vxfw.Widget {
-        return .{ .userdata = self, .drawFn = drawMain };
+        return .{ .userdata = self, .eventHandler = handleEventFn, .drawFn = drawMain };
     }
 
     pub fn anyConnected(self: *const Monitor) bool {
@@ -366,13 +405,14 @@ pub const Monitor = struct {
             .string_and_hex => "view:hex",
             .hex_only => "view:string",
         };
-        const hints = try arena.alloc(KeyHint, 6);
+        const hints = try arena.alloc(KeyHint, if (self.sel_active) 7 else 6);
         hints[0] = .{ .key = "o", .label = "open" };
         hints[1] = .{ .key = "c", .label = "clear" };
         hints[2] = .{ .key = "e", .label = "export" };
         hints[3] = .{ .key = "f", .label = follow_label };
         hints[4] = .{ .key = "Tab", .label = view_label };
         hints[5] = .{ .key = "↑↓", .label = "select" };
+        if (self.sel_active) hints[6] = .{ .key = "Ctrl+Shift+C", .label = "copy" };
         return hints;
     }
 
@@ -425,6 +465,20 @@ pub const Monitor = struct {
                 .ignored => return false,
             }
         }
+        // Must precede the plain 'c' (clear) check. Legacy terminals report
+        // Ctrl+Shift+C as Ctrl+C; that still falls through to quit in App.
+        if (key.matches('c', .{ .ctrl = true, .shift = true }) or
+            key.matches('C', .{ .ctrl = true, .shift = true }))
+        {
+            try self.copySelection(ctx);
+            ctx.redraw = true;
+            return true;
+        }
+        if (self.sel_active and key.matches(vaxis.Key.escape, .{})) {
+            self.sel_active = false;
+            ctx.redraw = true;
+            return true;
+        }
         if (key.matches('o', .{})) {
             try self.openOverlay();
             ctx.redraw = true;
@@ -451,6 +505,8 @@ pub const Monitor = struct {
         }
         if (key.matches(vaxis.Key.tab, .{})) {
             self.display_mode = self.nextDisplayMode();
+            // Columns mean something else in the new layout.
+            self.sel_active = false;
             ctx.redraw = true;
             return true;
         }
@@ -508,6 +564,8 @@ pub const Monitor = struct {
         self.lines_head = 0;
         self.lines_count = 0;
         self.list_view.cursor = 0;
+        self.sel_active = false;
+        self.dragging = false;
 
         // Acknowledge current warnings: snapshot dropped counters and mark
         // already-errored slots as acked. Future drops or new errors re-fire.
@@ -651,7 +709,11 @@ pub const Monitor = struct {
         try self.appendLine(line);
     }
 
-    fn appendLine(self: *Monitor, line: types.Line) !void {
+    fn appendLine(self: *Monitor, new_line: types.Line) !void {
+        var line = new_line;
+        line.seq = self.next_seq;
+        self.next_seq += 1;
+
         if (self.lines_count == max_history) {
             self.allocator.free(self.lines[self.lines_head].text);
             self.lines[self.lines_head] = line;
@@ -737,6 +799,14 @@ pub const Monitor = struct {
             try drawEmptyHint(self, chat_ctx)
         else
             try self.list_view.widget().draw(chat_ctx);
+
+        self.line_width = max.width -| list_cursor_cols;
+        self.visible.clearRetainingCapacity();
+        if (self.lines_count > 0) {
+            for (chat_surf.children) |child|
+                try self.collectVisible(child.surface, child.origin.row, child.origin.col);
+            self.highlightSelection();
+        }
 
         var all_children: std.ArrayList(vxfw.SubSurface) = .empty;
         try all_children.append(arena, .{ .surface = chat_surf, .origin = .{ .row = 0, .col = 0 }, .z_index = 0 });
@@ -882,11 +952,189 @@ pub const Monitor = struct {
         const port_idx = @min(line.port_id, types.max_slots - 1);
         const dev_style: vaxis.Style = .{ .fg = port_colors[port_idx], .bold = true };
 
-        return switch (self.display_mode) {
+        var surf = try switch (self.display_mode) {
             .string => line_render.drawString(arena, ctx, line, ts_text, dev_text, term_text, dev_style),
             .hex_only => line_render.drawHexOnly(arena, ctx, line, ts_text, dev_text, dev_style),
             .string_and_hex => line_render.drawStringAndHex(arena, ctx, line, ts_text, dev_text, term_text, dev_style, line_widget),
         };
+        // Tag the surface with the line widget so collectVisible can find it
+        // in the ListView's surface tree.
+        surf.widget = line_widget;
+        return surf;
+    }
+
+    fn isLineSurface(surf: vxfw.Surface) bool {
+        return @intFromPtr(surf.widget.drawFn) == @intFromPtr(&drawLineFn);
+    }
+
+    // Walk the ListView surface tree and record where each line row landed.
+    // The cursored line is wrapped in an extra surface, hence the recursion.
+    fn collectVisible(self: *Monitor, surf: vxfw.Surface, row: i32, col: i32) std.mem.Allocator.Error!void {
+        if (isLineSurface(surf)) {
+            const entry: *LineEntry = @ptrCast(@alignCast(surf.widget.userdata));
+            const line = self.lineAt(entry.slot_idx) orelse return;
+            try self.visible.append(self.allocator, .{
+                .row = row,
+                .col = col,
+                .height = surf.size.height,
+                .slot_idx = entry.slot_idx,
+                .seq = line.seq,
+                .surface = surf,
+            });
+            return;
+        }
+        for (surf.children) |child|
+            try self.collectVisible(child.surface, row + child.origin.row, col + child.origin.col);
+    }
+
+    fn highlightSelection(self: *Monitor) void {
+        const range = self.selectionRange() orelse return;
+        for (self.visible.items) |v| {
+            if (v.slot_idx < range.start_idx or v.slot_idx > range.end_idx) continue;
+            const from: u16 = if (v.slot_idx == range.start_idx) range.start_col else 0;
+            const to: u16 = if (v.slot_idx == range.end_idx) range.end_col else std.math.maxInt(u16);
+            selection.highlightRow(v.surface, 0, from, to);
+        }
+    }
+
+    fn indexOfSeq(self: *const Monitor, seq: u64) ?usize {
+        // Newest first: selections are usually near the bottom.
+        var i: usize = self.lines_count;
+        while (i > 0) {
+            i -= 1;
+            if (self.lineAt(i).?.seq == seq) return i;
+        }
+        return null;
+    }
+
+    // Resolve anchor/head to logical indices in reading order. Null when there
+    // is no selection or one of its lines has been evicted.
+    fn selectionRange(self: *const Monitor) ?SelectionRange {
+        if (!self.sel_active) return null;
+        const a_idx = self.indexOfSeq(self.sel_anchor.seq) orelse return null;
+        const h_idx = self.indexOfSeq(self.sel_head.seq) orelse return null;
+        const a_first = a_idx < h_idx or (a_idx == h_idx and self.sel_anchor.col <= self.sel_head.col);
+        const first = if (a_first) self.sel_anchor else self.sel_head;
+        const last = if (a_first) self.sel_head else self.sel_anchor;
+        return .{
+            .start_idx = if (a_first) a_idx else h_idx,
+            .start_col = first.col,
+            .end_idx = if (a_first) h_idx else a_idx,
+            .end_col = last.col,
+        };
+    }
+
+    // Map a Monitor-local cell to a selection point. Positions above/below the
+    // drawn lines clamp to the start of the first / end of the last line.
+    fn pointAt(self: *const Monitor, row: i32, col: i32) ?selection.Point {
+        const items = self.visible.items;
+        if (items.len == 0 or self.line_width == 0) return null;
+        const max_col: i32 = self.line_width - 1;
+
+        const first = items[0];
+        if (row < first.row) return .{ .seq = first.seq, .col = 0 };
+        for (items) |v| {
+            if (row >= v.row and row < v.row + v.height) {
+                const c = std.math.clamp(col - v.col, 0, max_col);
+                return .{ .seq = v.seq, .col = @intCast(c) };
+            }
+        }
+        const last = items[items.len - 1];
+        return .{ .seq = last.seq, .col = @intCast(max_col) };
+    }
+
+    fn isOnLine(self: *const Monitor, row: i32) bool {
+        for (self.visible.items) |v| {
+            if (row >= v.row and row < v.row + v.height) return true;
+        }
+        return false;
+    }
+
+    fn handleEventFn(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+        const self: *Monitor = @ptrCast(@alignCast(ptr));
+        switch (event) {
+            .mouse => |mouse| self.handleMouse(mouse, ctx),
+            else => {},
+        }
+    }
+
+    fn handleMouse(self: *Monitor, mouse: vaxis.Mouse, ctx: *vxfw.EventContext) void {
+        if (self.overlay_open or self.save_prompt_open) return;
+        // Wheel scrolling is handled by the ListView itself.
+        if (mouse.button != .left) return;
+        switch (mouse.type) {
+            .press => {
+                // Any click drops the previous selection and starts a new one.
+                self.sel_active = false;
+                if (!self.isOnLine(mouse.row)) {
+                    ctx.redraw = true;
+                    return;
+                }
+                const p = self.pointAt(mouse.row, mouse.col) orelse return;
+                self.sel_anchor = p;
+                self.sel_head = p;
+                self.dragging = true;
+                ctx.consumeAndRedraw();
+            },
+            .drag => {
+                if (!self.dragging) return;
+                const p = self.pointAt(mouse.row, mouse.col) orelse return;
+                self.sel_head = p;
+                self.sel_active = true;
+                ctx.consumeAndRedraw();
+            },
+            .release => {
+                self.dragging = false;
+                ctx.consumeAndRedraw();
+            },
+            .motion => {},
+        }
+    }
+
+    // Re-render every selected line off-screen at the current width and copy
+    // exactly the selected cells, so the clipboard matches what is shown.
+    fn copySelection(self: *Monitor, ctx: *vxfw.EventContext) !void {
+        const range = self.selectionRange() orelse {
+            self.setExportMessage("copy: nothing selected", true);
+            return;
+        };
+        const width = self.line_width;
+        if (width == 0) return;
+
+        var arena_state: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const cells = try arena.alloc(vaxis.Cell, width);
+        var out: std.ArrayList(u8) = .empty;
+
+        var idx = range.start_idx;
+        while (idx <= range.end_idx) : (idx += 1) {
+            const draw_ctx: vxfw.DrawContext = .{
+                .arena = arena,
+                .min = .{ .width = width, .height = 0 },
+                .max = .{ .width = width, .height = null },
+                .cell_size = .{},
+            };
+            const surf = try drawLineFn(&self.line_entries[idx], draw_ctx);
+            @memset(cells, .{ .default = true });
+            selection.flattenRow(surf, 0, cells);
+
+            const from: u16 = if (idx == range.start_idx) range.start_col else 0;
+            const to: u16 = if (idx == range.end_idx) range.end_col else width - 1;
+            if (idx != range.start_idx) try out.append(arena, '\n');
+            try selection.appendCellText(arena, &out, cells, from, to);
+        }
+
+        try ctx.copyToClipboard(out.items);
+
+        const n_lines = range.end_idx - range.start_idx + 1;
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "copied {d} {s}", .{
+            n_lines,
+            if (n_lines == 1) "line" else "lines",
+        }) catch "copied";
+        self.setExportMessage(msg, false);
     }
 };
 
