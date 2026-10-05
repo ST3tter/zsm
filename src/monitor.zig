@@ -1097,6 +1097,14 @@ pub const Monitor = struct {
         return .{ .seq = last.seq, .col = @intCast(max_col) };
     }
 
+    fn moveCursorToLine(self: *Monitor, seq: u64) void {
+        const idx = self.indexOfSeq(seq) orelse return;
+        self.list_view.cursor = @intCast(idx);
+        self.list_view.ensureScroll();
+        // Same as ↑: looking at an older line stops following new ones.
+        if (idx + 1 < self.lines_count) self.follow = false;
+    }
+
     fn isOnLine(self: *const Monitor, row: i32) bool {
         for (self.visible.items) |v| {
             if (row >= v.row and row < v.row + v.height) return true;
@@ -1138,6 +1146,10 @@ pub const Monitor = struct {
                 ctx.consumeAndRedraw();
             },
             .release => {
+                // A click without a drag moves the cursor (and with it the
+                // inspector) to the clicked line. Done on release rather than
+                // press so the inspector can't resize the layout mid-drag.
+                if (self.dragging and !self.sel_active) self.moveCursorToLine(self.sel_anchor.seq);
                 self.dragging = false;
                 ctx.consumeAndRedraw();
             },
@@ -1321,4 +1333,65 @@ test "TX colour stands apart from every device colour" {
         try std.testing.expect(dist >= 40.0);
     }
     try std.testing.expectEqual(theme.tx.fg, theme.tx_tag.fg);
+}
+
+// Monitor with three lines, drawn once so `visible` maps rows to lines.
+fn testMonitorWithLines(arena: std.mem.Allocator) !*Monitor {
+    const m = try std.testing.allocator.create(Monitor);
+    m.init(std.testing.allocator, std.testing.io, .{});
+    for ([_][]const u8{ "one", "two", "three" }, 0..) |t, i| {
+        try m.appendLine(.{
+            .port_id = 0,
+            .timestamp_ns = @intCast(i),
+            .text = try std.testing.allocator.dupe(u8, t),
+        });
+    }
+    m.list_view.cursor = 2;
+    const ctx: vxfw.DrawContext = .{
+        .arena = arena,
+        .min = .{ .width = 80, .height = 20 },
+        .max = .{ .width = 80, .height = 20 },
+        .cell_size = .{},
+    };
+    _ = try m.widget().draw(ctx);
+    return m;
+}
+
+fn testMouse(row: i32, col: i32, kind: vaxis.Mouse.Type) vaxis.Mouse {
+    return .{ .row = @intCast(row), .col = @intCast(col), .button = .left, .mods = .{}, .type = kind };
+}
+
+test "clicking a line moves the cursor (and inspector) to it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const m = try testMonitorWithLines(arena_state.allocator());
+    defer std.testing.allocator.destroy(m);
+    defer m.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(std.testing.allocator);
+
+    const row = m.visible.items[0].row;
+    m.handleMouse(testMouse(row, 20, .press), &ctx);
+    m.handleMouse(testMouse(row, 20, .release), &ctx);
+    try std.testing.expectEqual(@as(u32, 0), m.list_view.cursor);
+    // Like ↑: browsing older lines stops following new ones.
+    try std.testing.expect(!m.follow);
+}
+
+test "dragging selects text without moving the cursor" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const m = try testMonitorWithLines(arena_state.allocator());
+    defer std.testing.allocator.destroy(m);
+    defer m.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(std.testing.allocator);
+
+    const row = m.visible.items[0].row;
+    m.handleMouse(testMouse(row, 20, .press), &ctx);
+    m.handleMouse(testMouse(row, 24, .drag), &ctx);
+    m.handleMouse(testMouse(row, 24, .release), &ctx);
+    try std.testing.expect(m.sel_active);
+    try std.testing.expectEqual(@as(u32, 2), m.list_view.cursor);
+    try std.testing.expect(m.follow);
 }
