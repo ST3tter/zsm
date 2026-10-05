@@ -12,13 +12,28 @@ pub const tx_capacity: usize = 4096;
 
 pub const TxFailure = enum(u8) { none, failed, timeout };
 
+pub const TxFailureInfo = struct {
+    kind: TxFailure,
+    // OS error code (GetLastError on Windows); 0 if unknown.
+    code: u32,
+};
+
+/// Top-bar text for a failed send.
+pub fn describeTxFailure(buf: []u8, f: TxFailureInfo) []const u8 {
+    if (f.kind == .timeout) return "send failed: device not accepting data";
+    if (f.code == 0) return "send failed";
+    return std.fmt.bufPrint(buf, "send failed (OS error {d})", .{f.code}) catch "send failed";
+}
+
 /// Bytes waiting to be written to the port. The UI thread enqueues, the
 /// reader thread drains and does the actual write, so the two never contend
 /// for the (synchronous) handle.
 pub const TxQueue = struct {
     ring: ring_mod.SpscRing(u8, tx_capacity) = .{},
     // Last write failure, set by the reader thread, taken by the UI thread.
+    // The code is stored before the kind (release) and read after it (acquire).
     failure: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(TxFailure.none)),
+    failure_code: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     /// All-or-nothing, so a command is never sent truncated.
     pub fn enqueue(self: *TxQueue, bytes: []const u8) bool {
@@ -36,13 +51,15 @@ pub const TxQueue = struct {
         return out[0..n];
     }
 
-    pub fn fail(self: *TxQueue, f: TxFailure) void {
+    pub fn fail(self: *TxQueue, f: TxFailure, code: u32) void {
+        self.failure_code.store(code, .monotonic);
         self.failure.store(@backingInt(f), .release);
     }
 
-    pub fn takeFailure(self: *TxQueue) ?TxFailure {
+    pub fn takeFailure(self: *TxQueue) ?TxFailureInfo {
         const f: TxFailure = @fromBackingInt(@intCast(self.failure.swap(@backingInt(TxFailure.none), .acq_rel)));
-        return if (f == .none) null else f;
+        if (f == .none) return null;
+        return .{ .kind = f, .code = self.failure_code.load(.monotonic) };
     }
 };
 
@@ -62,6 +79,8 @@ pub const Port = struct {
     tx: TxQueue = .{},
 
     thread: ?std.Thread = null,
+    // OS error code of the last failed write; reader thread only.
+    last_os_error: u32 = 0,
 
     pub fn open(
         allocator: std.mem.Allocator,
@@ -139,7 +158,11 @@ pub const Port = struct {
             const chunk = self.tx.drain(&chunk_buf);
             if (chunk.len == 0) return;
             self.writeNow(chunk) catch |err| {
-                self.tx.fail(if (err == error.WriteTimeout) .timeout else .failed);
+                if (err == error.WriteTimeout) {
+                    self.tx.fail(.timeout, 0);
+                } else {
+                    self.tx.fail(.failed, self.last_os_error);
+                }
             };
         }
     }
@@ -151,7 +174,10 @@ pub const Port = struct {
             .windows => {
                 var written: std.os.windows.DWORD = 0;
                 const ok = WriteFile(self.file.handle, bytes.ptr, @intCast(bytes.len), &written, null);
-                if (ok == std.os.windows.BOOL.FALSE) return error.WriteFailed;
+                if (ok == std.os.windows.BOOL.FALSE) {
+                    self.last_os_error = @intFromEnum(std.os.windows.GetLastError());
+                    return error.WriteFailed;
+                }
                 // With a total write timeout set, a short count means it expired.
                 if (written < bytes.len) return error.WriteTimeout;
             },
@@ -292,7 +318,31 @@ test "TxQueue drains in order in chunks of the buffer size" {
 test "TxQueue failure is reported once" {
     var q: TxQueue = .{};
     try std.testing.expect(q.takeFailure() == null);
-    q.fail(.timeout);
-    try std.testing.expectEqual(TxFailure.timeout, q.takeFailure().?);
+    q.fail(.timeout, 0);
+    try std.testing.expectEqual(TxFailure.timeout, q.takeFailure().?.kind);
     try std.testing.expect(q.takeFailure() == null);
+}
+
+test "TxQueue failure carries the OS error code" {
+    var q: TxQueue = .{};
+    q.fail(.failed, 22);
+    const f = q.takeFailure().?;
+    try std.testing.expectEqual(TxFailure.failed, f.kind);
+    try std.testing.expectEqual(@as(u32, 22), f.code);
+}
+
+test "describeTxFailure names the cause" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "send failed: device not accepting data",
+        describeTxFailure(&buf, .{ .kind = .timeout, .code = 0 }),
+    );
+    try std.testing.expectEqualStrings(
+        "send failed (OS error 22)",
+        describeTxFailure(&buf, .{ .kind = .failed, .code = 22 }),
+    );
+    try std.testing.expectEqualStrings(
+        "send failed",
+        describeTxFailure(&buf, .{ .kind = .failed, .code = 0 }),
+    );
 }

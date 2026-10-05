@@ -316,10 +316,8 @@ pub const Monitor = struct {
         for (0..self.ports.len) |i| {
             const p = self.ports[i] orelse continue;
             if (p.tx.takeFailure()) |f| {
-                self.setExportMessage(switch (f) {
-                    .timeout => "send failed: device not accepting data",
-                    else => "send failed",
-                }, true);
+                var buf: [64]u8 = undefined;
+                self.setExportMessage(port_mod.describeTxFailure(&buf, f), true);
                 changed = true;
             }
             if (p.getState() == .errored) {
