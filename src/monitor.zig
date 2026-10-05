@@ -1293,3 +1293,32 @@ test "hotkeys are typed into the send bar while it is open" {
     try std.testing.expect(try m.handleKey(.{ .codepoint = 'f', .text = "f" }, &ctx));
     try std.testing.expect(!m.follow);
 }
+
+fn hueDegrees(c: vaxis.Color) f32 {
+    const rgb = c.rgb;
+    const r: f32 = @as(f32, @floatFromInt(rgb[0])) / 255.0;
+    const g: f32 = @as(f32, @floatFromInt(rgb[1])) / 255.0;
+    const b: f32 = @as(f32, @floatFromInt(rgb[2])) / 255.0;
+    const max = @max(r, @max(g, b));
+    const min = @min(r, @min(g, b));
+    const d = max - min;
+    if (d == 0) return 0;
+    var h: f32 = if (max == r)
+        @mod((g - b) / d, 6.0)
+    else if (max == g)
+        (b - r) / d + 2.0
+    else
+        (r - g) / d + 4.0;
+    h *= 60.0;
+    return if (h < 0) h + 360.0 else h;
+}
+
+test "TX colour stands apart from every device colour" {
+    const tx_hue = hueDegrees(theme.tx.fg);
+    for (port_colors) |c| {
+        const diff = @abs(tx_hue - hueDegrees(c));
+        const dist = @min(diff, 360.0 - diff);
+        try std.testing.expect(dist >= 40.0);
+    }
+    try std.testing.expectEqual(theme.tx.fg, theme.tx_tag.fg);
+}
