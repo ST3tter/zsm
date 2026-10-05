@@ -24,10 +24,14 @@ pub const App = struct {
     title_buf: [128]u8 = undefined,
     title_len: usize = 0,
 
-    pub fn init(self: *App, allocator: std.mem.Allocator, io: std.Io) void {
+    pub fn init(self: *App, allocator: std.mem.Allocator, io: std.Io, env_map: *const std.process.Environ.Map) void {
         self.allocator = allocator;
         self.io = io;
-        self.monitor.init(allocator, io);
+        self.monitor.init(allocator, io, .{
+            .appdata = env_map.get("APPDATA"),
+            .home = env_map.get("HOME"),
+            .xdg_state_home = env_map.get("XDG_STATE_HOME"),
+        });
         self.top_bar.app = self;
         self.bottom_bar.app = self;
     }

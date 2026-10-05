@@ -15,6 +15,7 @@ const line_render = @import("line_render.zig");
 const exp = @import("export.zig");
 const save_prompt_mod = @import("save_prompt.zig");
 const selection = @import("selection.zig");
+const send_bar_mod = @import("send_bar.zig");
 
 pub const max_history: usize = 10000;
 
@@ -91,6 +92,8 @@ pub const Monitor = struct {
     overlay_open: bool = false,
     save_prompt: save_prompt_mod.SavePrompt,
     save_prompt_open: bool = false,
+    send_bar: send_bar_mod.SendBar,
+    send_bar_open: bool = false,
     follow: bool = true,
     display_mode: DisplayMode = .string,
 
@@ -111,7 +114,7 @@ pub const Monitor = struct {
     visible: std.ArrayList(VisibleLine) = .empty,
     line_width: u16 = 0,
 
-    pub fn init(self: *Monitor, allocator: std.mem.Allocator, io: std.Io) void {
+    pub fn init(self: *Monitor, allocator: std.mem.Allocator, io: std.Io, env: send_bar_mod.EnvVars) void {
         self.allocator = allocator;
         self.io = io;
         self.ports = .{ null, null, null, null };
@@ -134,6 +137,8 @@ pub const Monitor = struct {
         self.overlay_open = false;
         self.save_prompt = save_prompt_mod.SavePrompt.init(allocator, io);
         self.save_prompt_open = false;
+        self.send_bar = send_bar_mod.SendBar.init(allocator, io, env);
+        self.send_bar_open = false;
         self.follow = true;
         self.display_mode = .string;
         self.next_seq = 0;
@@ -168,6 +173,7 @@ pub const Monitor = struct {
         self.lines_count = 0;
         self.overlay.deinit();
         self.save_prompt.deinit();
+        self.send_bar.deinit();
         self.visible.deinit(self.allocator);
     }
 
@@ -399,20 +405,29 @@ pub const Monitor = struct {
             hints[4] = .{ .key = "b", .label = "baud" };
             return hints;
         }
+        if (self.send_bar_open) {
+            const hints = try arena.alloc(KeyHint, 4);
+            hints[0] = .{ .key = "Enter", .label = "send" };
+            hints[1] = .{ .key = "Tab", .label = "ending" };
+            hints[2] = .{ .key = "↑↓", .label = "history" };
+            hints[3] = .{ .key = "Esc", .label = "close" };
+            return hints;
+        }
         const follow_label: []const u8 = if (self.follow) "follow:on" else "follow:off";
         const view_label: []const u8 = switch (self.display_mode) {
             .string => "view:string+hex",
             .string_and_hex => "view:hex",
             .hex_only => "view:string",
         };
-        const hints = try arena.alloc(KeyHint, if (self.sel_active) 7 else 6);
+        const hints = try arena.alloc(KeyHint, if (self.sel_active) 8 else 7);
         hints[0] = .{ .key = "o", .label = "open" };
-        hints[1] = .{ .key = "c", .label = "clear" };
-        hints[2] = .{ .key = "e", .label = "export" };
-        hints[3] = .{ .key = "f", .label = follow_label };
-        hints[4] = .{ .key = "Tab", .label = view_label };
-        hints[5] = .{ .key = "↑↓", .label = "select" };
-        if (self.sel_active) hints[6] = .{ .key = "Ctrl+Shift+C", .label = "copy" };
+        hints[1] = .{ .key = "s", .label = "send" };
+        hints[2] = .{ .key = "c", .label = "clear" };
+        hints[3] = .{ .key = "e", .label = "export" };
+        hints[4] = .{ .key = "f", .label = follow_label };
+        hints[5] = .{ .key = "Tab", .label = view_label };
+        hints[6] = .{ .key = "↑↓", .label = "select" };
+        if (self.sel_active) hints[7] = .{ .key = "Ctrl+Shift+C", .label = "copy" };
         return hints;
     }
 
@@ -474,8 +489,33 @@ pub const Monitor = struct {
             ctx.redraw = true;
             return true;
         }
+        if (self.send_bar_open) {
+            switch (self.send_bar.handleKey(key, ctx)) {
+                .close => {
+                    self.send_bar_open = false;
+                    ctx.redraw = true;
+                    return true;
+                },
+                .send => {
+                    self.sendToD0();
+                    ctx.redraw = true;
+                    return true;
+                },
+                .consumed => {
+                    ctx.redraw = true;
+                    return true;
+                },
+                // Unhandled (e.g. Ctrl+C) goes to App; Monitor hotkeys stay off.
+                .ignored => return false,
+            }
+        }
         if (self.sel_active and key.matches(vaxis.Key.escape, .{})) {
             self.sel_active = false;
+            ctx.redraw = true;
+            return true;
+        }
+        if (key.matches('s', .{})) {
+            self.send_bar_open = true;
             ctx.redraw = true;
             return true;
         }
@@ -769,6 +809,8 @@ pub const Monitor = struct {
         self.list_view.item_count = @intCast(self.lines_count);
 
         const footer_h: u16 = if (max.height >= 3) 2 else 0;
+        // hrule + one input row, only when it fits above the footer
+        const send_h: u16 = if (self.send_bar_open and max.height >= footer_h + 3) 2 else 0;
 
         const cursor_line: ?types.Line = if (self.lines_count > 0)
             self.lineAt(@intCast(self.list_view.cursor))
@@ -782,13 +824,13 @@ pub const Monitor = struct {
             if (content_h > 0) {
                 // include 1 row hrule above inspector content
                 const block_h: u16 = content_h + 1;
-                if (block_h + footer_h + 1 <= max.height) {
+                if (block_h + footer_h + send_h + 1 <= max.height) {
                     inspector_h = block_h;
                 }
             }
         }
 
-        const chat_h: u16 = max.height - footer_h - inspector_h;
+        const chat_h: u16 = max.height - footer_h - inspector_h - send_h;
 
         const chat_ctx = ctx.withConstraints(
             .{ .width = max.width, .height = chat_h },
@@ -823,10 +865,23 @@ pub const Monitor = struct {
             try all_children.append(arena, .{ .surface = insp_surf, .origin = .{ .row = @intCast(chat_h + 1), .col = 0 }, .z_index = 0 });
         }
 
+        if (send_h > 0) {
+            const send_row: u16 = chat_h + inspector_h;
+            const send_hrule = try drawHRule(ctx, max.width);
+            try all_children.append(arena, .{ .surface = send_hrule, .origin = .{ .row = @intCast(send_row), .col = 0 }, .z_index = 0 });
+
+            self.send_bar.d0_connected = self.ports[0] != null;
+            const bar_surf = try self.send_bar.widget().draw(ctx.withConstraints(
+                .{ .width = max.width, .height = 1 },
+                .{ .width = max.width, .height = 1 },
+            ));
+            try all_children.append(arena, .{ .surface = bar_surf, .origin = .{ .row = @intCast(send_row + 1), .col = 0 }, .z_index = 0 });
+        }
+
         if (footer_h > 0) {
             const hrule_surf = try drawHRule(ctx, max.width);
             const footer_surf = try self.drawFooter(ctx);
-            const footer_origin_row: u16 = chat_h + inspector_h;
+            const footer_origin_row: u16 = chat_h + inspector_h + send_h;
             try all_children.append(arena, .{ .surface = hrule_surf, .origin = .{ .row = @intCast(footer_origin_row), .col = 0 }, .z_index = 0 });
             try all_children.append(arena, .{ .surface = footer_surf, .origin = .{ .row = @intCast(footer_origin_row + 1), .col = 0 }, .z_index = 0 });
         }
@@ -1083,6 +1138,49 @@ pub const Monitor = struct {
             },
             .motion => {},
         }
+    }
+
+    // Write the input plus the chosen ending to D0 and echo it as a TX line.
+    // On failure the input is kept so the user can retry.
+    fn sendToD0(self: *Monitor) void {
+        var arena_state: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const text = self.send_bar.currentText(arena) catch return;
+        const ending = self.send_bar.ending;
+        const term = types.terminatorBytes(ending);
+        if (text.len == 0 and term.len == 0) return;
+
+        const port = self.ports[0] orelse {
+            self.setExportMessage("send: D0 not connected", true);
+            return;
+        };
+        const payload = std.mem.concat(arena, u8, &.{ text, term }) catch return;
+        port.write(payload) catch |err| {
+            var buf: [128]u8 = undefined;
+            const m = std.fmt.bufPrint(&buf, "send failed: {s}", .{@errorName(err)}) catch "send failed";
+            self.setExportMessage(m, true);
+            return;
+        };
+
+        const now: u64 = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
+        const owned = self.allocator.dupe(u8, text) catch return;
+        self.appendLine(.{
+            .port_id = 0,
+            .timestamp_ns = now,
+            .text = owned,
+            .terminator = ending,
+            .direction = .tx,
+        }) catch {
+            self.allocator.free(owned);
+            return;
+        };
+        if (self.follow and self.lines_count > 0) {
+            self.list_view.cursor = @intCast(self.lines_count - 1);
+            self.list_view.ensureScroll();
+        }
+        self.send_bar.commitSent(text);
     }
 
     // Re-render every selected line off-screen at the current width and copy

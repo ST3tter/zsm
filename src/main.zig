@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     const model = try alloc.create(App);
     defer alloc.destroy(model);
     model.* = .{};
-    model.init(alloc, io);
+    model.init(alloc, io, init.environ_map);
     defer model.deinit();
 
     try app.run(model.widget(), .{});

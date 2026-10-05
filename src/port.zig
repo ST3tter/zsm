@@ -85,6 +85,25 @@ pub const Port = struct {
         return self.dropped.load(.monotonic);
     }
 
+    /// Blocking write of all bytes, called from the UI thread. On Windows the
+    /// handle is non-overlapped, so this can wait up to ReadTotalTimeoutConstant
+    /// (100ms) behind the reader thread's pending ReadFile.
+    pub fn write(self: *Port, bytes: []const u8) !void {
+        switch (comptime builtin.target.os.tag) {
+            .windows => {
+                var off: usize = 0;
+                while (off < bytes.len) {
+                    var written: std.os.windows.DWORD = 0;
+                    const rest = bytes[off..];
+                    const ok = WriteFile(self.file.handle, rest.ptr, @intCast(rest.len), &written, null);
+                    if (ok == std.os.windows.BOOL.FALSE or written == 0) return error.WriteFailed;
+                    off += written;
+                }
+            },
+            else => try self.file.writeStreamingAll(self.io, bytes),
+        }
+    }
+
     fn readerThread(self: *Port) void {
         var buf: [types.event_payload_bytes]u8 = undefined;
         while (self.running.load(.acquire) == 1) {
@@ -161,6 +180,14 @@ extern "kernel32" fn ReadFile(
     lpBuffer: [*]u8,
     nNumberOfBytesToRead: std.os.windows.DWORD,
     lpNumberOfBytesRead: *std.os.windows.DWORD,
+    lpOverlapped: ?*anyopaque,
+) callconv(.winapi) std.os.windows.BOOL;
+
+extern "kernel32" fn WriteFile(
+    hFile: std.os.windows.HANDLE,
+    lpBuffer: [*]const u8,
+    nNumberOfBytesToWrite: std.os.windows.DWORD,
+    lpNumberOfBytesWritten: *std.os.windows.DWORD,
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) std.os.windows.BOOL;
 
