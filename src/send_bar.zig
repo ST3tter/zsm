@@ -12,6 +12,8 @@ const types = @import("types.zig");
 
 pub const max_history_entries: usize = 200;
 pub const history_file_name = "history.txt";
+// Larger files are treated as unreadable (and then left untouched).
+pub const history_max_bytes: usize = 1 << 20;
 
 pub const History = struct {
     allocator: std.mem.Allocator,
@@ -167,6 +169,9 @@ pub const SendBar = struct {
 
     // Owned copy of the base directory; null = no persistent history.
     location: ?HistoryLocation = null,
+    // False after an existing history file failed to load, so a save can't
+    // replace it with just this session's commands.
+    history_writable: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, env: EnvVars) SendBar {
         var input = vxfw.TextField.init(allocator);
@@ -239,15 +244,28 @@ pub const SendBar = struct {
     }
 
     pub fn loadHistoryFrom(self: *SendBar, dir: std.Io.Dir) void {
-        const data = dir.readFileAlloc(self.io, history_file_name, self.allocator, .limited(1 << 20)) catch return;
+        const data = dir.readFileAlloc(self.io, history_file_name, self.allocator, .limited(history_max_bytes)) catch |err| {
+            // No file yet is the normal first run; anything else means a file
+            // exists that we couldn't read, so leave it alone.
+            if (err != error.FileNotFound) self.history_writable = false;
+            return;
+        };
         defer self.allocator.free(data);
-        self.history.load(data) catch {};
+        self.history.load(data) catch {
+            self.history_writable = false;
+        };
     }
 
+    /// Replace the history file atomically (temp file + rename), so a crash
+    /// mid-write can't leave it truncated.
     pub fn saveHistoryTo(self: *SendBar, dir: std.Io.Dir) void {
+        if (!self.history_writable) return;
         const data = self.history.serialize(self.allocator) catch return;
         defer self.allocator.free(data);
-        dir.writeFile(self.io, .{ .sub_path = history_file_name, .data = data }) catch {};
+        var af = dir.createFileAtomic(self.io, history_file_name, .{ .replace = true }) catch return;
+        defer af.deinit(self.io);
+        af.file.writeStreamingAll(self.io, data) catch return;
+        af.replace(self.io) catch {};
     }
 
     fn loadHistory(self: *SendBar) void {
@@ -493,4 +511,25 @@ test "loading a missing history file leaves history empty" {
     defer bar.deinit();
     bar.loadHistoryFrom(tmp.dir);
     try testing.expectEqual(@as(usize, 0), bar.history.entries.items.len);
+}
+
+test "a history file that failed to load is not overwritten" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Bigger than the load limit, so loading fails with StreamTooLong.
+    const big = try testing.allocator.alloc(u8, history_max_bytes + 1);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = history_file_name, .data = big });
+
+    var bar = SendBar.init(testing.allocator, testing.io, .{});
+    defer bar.deinit();
+    bar.loadHistoryFrom(tmp.dir);
+    try bar.history.push("AT");
+    bar.saveHistoryTo(tmp.dir);
+
+    const after = try tmp.dir.readFileAlloc(testing.io, history_file_name, testing.allocator, .limited(history_max_bytes * 2));
+    defer testing.allocator.free(after);
+    try testing.expectEqual(big.len, after.len);
 }
