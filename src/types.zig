@@ -35,6 +35,8 @@ pub fn terminatorBytes(t: Terminator) []const u8 {
     };
 }
 
+pub const Direction = enum { rx, tx };
+
 pub const Line = struct {
     port_id: u8,
     timestamp_ns: u64,
@@ -42,7 +44,20 @@ pub const Line = struct {
     terminator: Terminator = .lf,
     // Assigned by Monitor.appendLine; stable identity for mouse selection.
     seq: u64 = 0,
+    // .tx lines are commands we sent (echoed into the log), not device output.
+    direction: Direction = .rx,
 };
+
+/// Escaped notation used in the UI and export (e.g. "\\r\\n"); "" for none.
+pub fn terminatorNotation(t: Terminator) []const u8 {
+    return switch (t) {
+        .none => "",
+        .lf => "\\n",
+        .cr => "\\r",
+        .crlf => "\\r\\n",
+        .lfcr => "\\n\\r",
+    };
+}
 
 pub const PortState = enum {
     closed,

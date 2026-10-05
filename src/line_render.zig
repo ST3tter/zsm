@@ -8,6 +8,19 @@ const fmt = @import("fmt.zig");
 
 const inspector_min_body_w: u16 = 16;
 
+/// Device tag between timestamp and body: " [D0] " for received lines,
+/// " [D0] → " for commands we sent.
+pub fn devLabel(arena: std.mem.Allocator, line: types.Line) ![]const u8 {
+    return switch (line.direction) {
+        .rx => arena.print(" [D{d}] ", .{line.port_id}),
+        .tx => arena.print(" [D{d}] → ", .{line.port_id}),
+    };
+}
+
+fn bodyStyle(line: types.Line) vaxis.Style {
+    return if (line.direction == .tx) theme.tx else theme.normal;
+}
+
 pub fn drawString(
     arena: std.mem.Allocator,
     ctx: vxfw.DrawContext,
@@ -20,7 +33,7 @@ pub fn drawString(
     var spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
     try spans.append(arena, .{ .text = dev_text, .style = dev_style });
-    try pushBodySpans(arena, &spans, line.text);
+    try pushBodySpans(arena, &spans, line.text, bodyStyle(line));
     try spans.append(arena, .{ .text = term_text, .style = theme.subtitle });
 
     const rt = try arena.create(vxfw.RichText);
@@ -44,12 +57,12 @@ pub fn drawHexOnly(
     var spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
     try spans.append(arena, .{ .text = dev_text, .style = dev_style });
-    try buildHexSpans(arena, &spans, line.text);
+    try buildHexSpans(arena, &spans, line.text, bodyStyle(line));
     const term_bytes = types.terminatorBytes(line.terminator);
     if (line.text.len > 0 and term_bytes.len > 0) {
         try spans.append(arena, .{ .text = " ", .style = theme.subtitle });
     }
-    try buildHexSpans(arena, &spans, term_bytes);
+    try buildHexSpans(arena, &spans, term_bytes, theme.subtitle);
 
     const rt = try arena.create(vxfw.RichText);
     rt.* = .{
@@ -89,7 +102,7 @@ pub fn drawStringAndHex(
     var left_spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
     try left_spans.append(arena, .{ .text = ts_text, .style = theme.subtitle });
     try left_spans.append(arena, .{ .text = dev_text, .style = dev_style });
-    try pushBodySpans(arena, &left_spans, line.text);
+    try pushBodySpans(arena, &left_spans, line.text, bodyStyle(line));
     try left_spans.append(arena, .{ .text = term_text, .style = theme.subtitle });
 
     const left_rt = try arena.create(vxfw.RichText);
@@ -105,12 +118,12 @@ pub fn drawStringAndHex(
     ));
 
     var right_spans: std.ArrayList(vxfw.RichText.TextSpan) = .empty;
-    try buildHexSpans(arena, &right_spans, line.text);
+    try buildHexSpans(arena, &right_spans, line.text, bodyStyle(line));
     const term_bytes = types.terminatorBytes(line.terminator);
     if (line.text.len > 0 and term_bytes.len > 0) {
         try right_spans.append(arena, .{ .text = " ", .style = theme.subtitle });
     }
-    try buildHexSpans(arena, &right_spans, term_bytes);
+    try buildHexSpans(arena, &right_spans, term_bytes, theme.subtitle);
 
     const right_rt = try arena.create(vxfw.RichText);
     right_rt.* = .{
@@ -155,6 +168,7 @@ fn pushBodySpans(
     arena: std.mem.Allocator,
     list: *std.ArrayList(vxfw.RichText.TextSpan),
     text: []const u8,
+    body_style: vaxis.Style,
 ) !void {
     var run_start: usize = 0;
     var i: usize = 0;
@@ -163,7 +177,7 @@ fn pushBodySpans(
         if (i > run_start) {
             try list.append(arena, .{
                 .text = text[run_start..i],
-                .style = theme.normal,
+                .style = body_style,
             });
         }
         const esc = try fmt.escapeOne(arena, text[i]);
@@ -173,7 +187,7 @@ fn pushBodySpans(
     if (text.len > run_start) {
         try list.append(arena, .{
             .text = text[run_start..],
-            .style = theme.normal,
+            .style = body_style,
         });
     }
 }
@@ -182,13 +196,88 @@ fn buildHexSpans(
     arena: std.mem.Allocator,
     list: *std.ArrayList(vxfw.RichText.TextSpan),
     text: []const u8,
+    body_style: vaxis.Style,
 ) !void {
     for (text, 0..) |b, i| {
         if (i > 0) {
             try list.append(arena, .{ .text = " ", .style = theme.subtitle });
         }
         const hex = try fmt.hexRepr(arena, b);
-        const style: vaxis.Style = if (fmt.isControlByte(b)) theme.subtitle else theme.normal;
+        const style: vaxis.Style = if (fmt.isControlByte(b)) theme.subtitle else body_style;
         try list.append(arena, .{ .text = hex, .style = style });
     }
+}
+
+const selection = @import("selection.zig");
+
+fn renderedText(arena: std.mem.Allocator, surf: vxfw.Surface, width: u16) ![]const u8 {
+    const cells = try arena.alloc(vaxis.Cell, width);
+    @memset(cells, .{ .default = true });
+    selection.flattenRow(surf, 0, cells);
+    var out: std.ArrayList(u8) = .empty;
+    try selection.appendCellText(arena, &out, cells, 0, width - 1);
+    return out.items;
+}
+
+fn testCtx(arena: std.mem.Allocator, width: u16) vxfw.DrawContext {
+    return .{
+        .arena = arena,
+        .min = .{ .width = 0, .height = 0 },
+        .max = .{ .width = width, .height = null },
+        .cell_size = .{},
+    };
+}
+
+test "devLabel marks TX lines with an arrow" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var text = "x".*;
+    const rx: types.Line = .{ .port_id = 2, .timestamp_ns = 0, .text = &text };
+    const tx: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text, .direction = .tx };
+    try std.testing.expectEqualStrings(" [D2] ", try devLabel(arena, rx));
+    try std.testing.expectEqualStrings(" [D0] → ", try devLabel(arena, tx));
+}
+
+test "TX line renders with marker and accent body" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var text = "AT+GMR".*;
+    const line: types.Line = .{
+        .port_id = 0,
+        .timestamp_ns = 0,
+        .text = &text,
+        .terminator = .crlf,
+        .direction = .tx,
+    };
+    const dev = try devLabel(arena, line);
+    const surf = try drawString(arena, testCtx(arena, 40), line, "00:00:00.000", dev, types.terminatorNotation(line.terminator), .{});
+    try std.testing.expectEqualStrings("00:00:00.000 [D0] → AT+GMR\\r\\n", try renderedText(arena, surf, 40));
+
+    // 'A' sits after the 12-cell timestamp and the 8-cell " [D0] → " label.
+    const cells = try arena.alloc(vaxis.Cell, 40);
+    @memset(cells, .{ .default = true });
+    selection.flattenRow(surf, 0, cells);
+    try std.testing.expectEqualStrings("A", cells[20].char.grapheme);
+    try std.testing.expectEqual(theme.tx.fg, cells[20].style.fg);
+}
+
+test "RX line body keeps the normal style" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var text = "OK".*;
+    const line: types.Line = .{ .port_id = 0, .timestamp_ns = 0, .text = &text, .terminator = .none };
+    const dev = try devLabel(arena, line);
+    const surf = try drawString(arena, testCtx(arena, 30), line, "00:00:00.000", dev, "", .{});
+    const cells = try arena.alloc(vaxis.Cell, 30);
+    @memset(cells, .{ .default = true });
+    selection.flattenRow(surf, 0, cells);
+    // 12-cell timestamp + 6-cell " [D0] " label.
+    try std.testing.expectEqualStrings("O", cells[18].char.grapheme);
+    try std.testing.expectEqual(theme.normal.fg, cells[18].style.fg);
 }

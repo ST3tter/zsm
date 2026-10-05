@@ -12,6 +12,7 @@ comptime {
     _ = @import("export.zig");
     _ = @import("save_prompt.zig");
     _ = @import("selection.zig");
+    _ = @import("line_render.zig");
 }
 
 pub fn main(init: std.process.Init) !void {

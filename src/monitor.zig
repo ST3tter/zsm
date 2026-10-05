@@ -940,14 +940,8 @@ pub const Monitor = struct {
         const line = self.lineAt(entry.slot_idx) orelse return vxfw.Surface.empty(line_widget);
 
         const ts_text = try fmt.formatTimestamp(arena, line.timestamp_ns);
-        const dev_text = try arena.print(" [D{d}] ", .{line.port_id});
-        const term_text: []const u8 = switch (line.terminator) {
-            .none => "",
-            .lf => "\\n",
-            .cr => "\\r",
-            .crlf => "\\r\\n",
-            .lfcr => "\\n\\r",
-        };
+        const dev_text = try line_render.devLabel(arena, line);
+        const term_text = types.terminatorNotation(line.terminator);
 
         const port_idx = @min(line.port_id, types.max_slots - 1);
         const dev_style: vaxis.Style = .{ .fg = port_colors[port_idx], .bold = true };
