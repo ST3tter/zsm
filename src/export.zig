@@ -24,13 +24,13 @@ pub fn makeFilename(arena: std.mem.Allocator, ts_ns: u64) ![]const u8 {
     });
 }
 
-/// Build the full CSV body in memory. Columns: timestamp, port, len, term,
-/// string, hex. CRLF line endings (Excel-friendly). The string and hex columns
-/// cover the line body only; the terminator bytes are reported via the term
-/// column.
+/// Build the full CSV body in memory. Columns: timestamp, port, dir, len,
+/// term, string, hex. CRLF line endings (Excel-friendly). The string and hex
+/// columns cover the line body only; the terminator bytes are reported via the
+/// term column.
 pub fn buildCsv(arena: std.mem.Allocator, lines: []const types.Line) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(arena, "timestamp,port,len,term,string,hex" ++ csv_eol);
+    try out.appendSlice(arena, "timestamp,port,dir,len,term,string,hex" ++ csv_eol);
     for (lines) |line| try appendRow(arena, &out, line);
     return out.items;
 }
@@ -45,13 +45,17 @@ fn appendRow(arena: std.mem.Allocator, out: *std.ArrayList(u8), line: types.Line
     try out.appendSlice(arena, port_str);
     try out.append(arena, ',');
 
+    // dir column — rx for device output, tx for commands we sent
+    try out.appendSlice(arena, @tagName(line.direction));
+    try out.append(arena, ',');
+
     const len_str = try std.fmt.bufPrint(&num_buf, "{d}", .{line.text.len});
     try out.appendSlice(arena, len_str);
     try out.append(arena, ',');
 
     // term column — the same notation the UI uses (\n, \r, \r\n, \n\r)
     try out.append(arena, '"');
-    try out.appendSlice(arena, terminatorNotation(line.terminator));
+    try out.appendSlice(arena, types.terminatorNotation(line.terminator));
     try out.append(arena, '"');
     try out.append(arena, ',');
 
@@ -67,16 +71,6 @@ fn appendRow(arena: std.mem.Allocator, out: *std.ArrayList(u8), line: types.Line
     try out.append(arena, '"');
 
     try out.appendSlice(arena, csv_eol);
-}
-
-fn terminatorNotation(t: types.Terminator) []const u8 {
-    return switch (t) {
-        .none => "",
-        .lf => "\\n",
-        .cr => "\\r",
-        .crlf => "\\r\\n",
-        .lfcr => "\\n\\r",
-    };
 }
 
 fn appendStringField(arena: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
@@ -109,7 +103,7 @@ test "buildCsv header only when no lines" {
     const arena = arena_state.allocator();
 
     const csv = try buildCsv(arena, &.{});
-    try std.testing.expectEqualStrings("timestamp,port,len,term,string,hex\r\n", csv);
+    try std.testing.expectEqualStrings("timestamp,port,dir,len,term,string,hex\r\n", csv);
 }
 
 test "buildCsv escapes control bytes and quotes" {
@@ -127,6 +121,25 @@ test "buildCsv escapes control bytes and quotes" {
 
     const csv = try buildCsv(arena, &lines);
     // Header + one row. We just check the row substring matches.
-    const expected_row = "1970-01-01T00:00:00.000,2,5,\"\\r\\n\",\"Hi\\x01\"\"\\xff\",\"48 69 01 22 ff\"\r\n";
+    const expected_row = "1970-01-01T00:00:00.000,2,rx,5,\"\\r\\n\",\"Hi\\x01\"\"\\xff\",\"48 69 01 22 ff\"\r\n";
+    try std.testing.expect(std.mem.indexOf(u8, csv, expected_row) != null);
+}
+
+test "buildCsv marks sent lines as tx" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var text = "AT".*;
+    const lines = [_]types.Line{.{
+        .port_id = 0,
+        .timestamp_ns = 0,
+        .text = &text,
+        .terminator = .crlf,
+        .direction = .tx,
+    }};
+
+    const csv = try buildCsv(arena, &lines);
+    const expected_row = "1970-01-01T00:00:00.000,0,tx,2,\"\\r\\n\",\"AT\",\"41 54\"\r\n";
     try std.testing.expect(std.mem.indexOf(u8, csv, expected_row) != null);
 }
