@@ -4,6 +4,16 @@ const vxfw = vaxis.vxfw;
 
 const App = @import("app.zig").App;
 
+// Restore the terminal (leave the alt screen, stop mouse reporting) before
+// printing a panic, so the message and stack trace are readable.
+// (vaxis.Panic still uses the pre-0.17 three-argument signature.)
+pub const panic = std.debug.FullPanic(panicRestoringTerminal);
+
+fn panicRestoringTerminal(msg: []const u8, ret_addr: ?usize) noreturn {
+    vaxis.recover();
+    std.debug.defaultPanic(msg, ret_addr);
+}
+
 comptime {
     _ = @import("monitor.zig");
     _ = @import("inspector.zig");
