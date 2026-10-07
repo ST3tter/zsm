@@ -610,6 +610,9 @@ pub const Monitor = struct {
         self.lines_head = 0;
         self.lines_count = 0;
         self.list_view.cursor = 0;
+        // The scroll position still points into the old (longer) list; left
+        // as is, ListView asserts on the next draw once new lines arrive.
+        self.list_view.scroll = .{};
         self.sel_active = false;
         self.dragging = false;
 
@@ -1423,4 +1426,38 @@ test "footer hints show the current view mode, like follow" {
         try std.testing.expectEqualStrings(e.label, hintLabel(try m.keyHints(arena), "Tab").?);
     }
     try std.testing.expectEqualStrings("follow:on", hintLabel(try m.keyHints(arena), "f").?);
+}
+
+test "clear then new data with follow off redraws without panicking" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const m = try std.testing.allocator.create(Monitor);
+    defer std.testing.allocator.destroy(m);
+    m.init(std.testing.allocator, std.testing.io, .{});
+    defer m.deinit();
+
+    const ctx: vxfw.DrawContext = .{
+        .arena = arena,
+        .min = .{ .width = 80, .height = 20 },
+        .max = .{ .width = 80, .height = 20 },
+        .cell_size = .{},
+    };
+
+    // Scroll far down a long log so the list's scroll position is deep.
+    for (0..200) |i| {
+        try m.appendLine(.{ .port_id = 0, .timestamp_ns = @intCast(i), .text = try std.testing.allocator.dupe(u8, "line") });
+    }
+    m.list_view.cursor = 199;
+    m.list_view.ensureScroll();
+    _ = try m.widget().draw(ctx);
+
+    // Clear, follow off, then a few new lines arrive.
+    m.clear();
+    m.follow = false;
+    for (0..3) |i| {
+        try m.appendLine(.{ .port_id = 0, .timestamp_ns = @intCast(1000 + i), .text = try std.testing.allocator.dupe(u8, "new") });
+    }
+    _ = try m.widget().draw(ctx);
+    try std.testing.expectEqual(@as(usize, 3), m.visible.items.len);
 }
